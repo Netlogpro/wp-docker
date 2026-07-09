@@ -1,6 +1,6 @@
 # Local environment overrides
 .env
 
-# Extra plugins dropped into the test stack (keep the folder itself)
+# Extra plugin archives dropped into the test stack (keep the folder itself)
 /plugins/*
 !/plugins/.gitkeep

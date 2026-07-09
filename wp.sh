@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # Spins up a throwaway WordPress + MySQL stack in Docker, installs WordPress,
-# installs/activates anything dropped into plugins/ (zips, folders, or loose
-# .php files), and runs composer install for plugin folders that need it.
+# copies plugin .zip archives from plugins/ into the container, then extracts
+# and activates them there (host plugins/ stays zip-only).
 #
 # Usage:
 #   ./wp.sh          # build/start everything and configure WordPress
@@ -95,14 +95,17 @@ echo "==> Setting pretty permalinks..."
 $DC exec -T wordpress wp --allow-root rewrite structure '/%postname%/'
 $DC exec -T wordpress wp --allow-root rewrite flush --hard
 
-echo "==> Installing/activating extra plugins from plugins/ ..."
+echo "==> Installing/activating plugins from plugins/ ..."
+PLUGIN_ZIPS_DIR=/var/plugin-zips
+PLUGIN_INSTALL_DIR=/var/www/html/wp-content/plugins
+
 shopt -s nullglob
-extra_plugins=(plugins/*)
+plugin_entries=(plugins/*)
 shopt -u nullglob
-if [ ${#extra_plugins[@]} -eq 0 ]; then
+if [ ${#plugin_entries[@]} -eq 0 ]; then
   echo "    None found (plugins/ is empty)."
 else
-  for entry in "${extra_plugins[@]}"; do
+  for entry in "${plugin_entries[@]}"; do
     name="$(basename "$entry")"
 
     # Skip placeholder / hidden entries (e.g. .gitkeep).
@@ -110,29 +113,41 @@ else
       continue
     fi
 
-    plugin_container_path="/var/www/html/wp-content/plugins/$name"
-
-    # A .zip dropped in plugins/ is extracted in place via WP-CLI (which
-    # understands normal WordPress.org plugin zip layouts, incl. zips that wrap
-    # everything in a single top-level folder) and activated in one step.
     if [ -f "$entry" ] && [[ "$name" == *.zip ]]; then
-      echo "    Unzipping and installing $name..."
-      $DC exec -T wordpress wp --allow-root plugin install "$plugin_container_path" --activate --force \
+      echo "    Installing $name from archive (extract inside container)..."
+      $DC exec -T wordpress wp --allow-root plugin install "$PLUGIN_ZIPS_DIR/$name" --activate --force \
         || echo "    Warning: could not install '$name' (is it a valid WordPress plugin zip?)."
       continue
     fi
 
-    slug="$name"
-    if [ -d "$entry" ] && [ -f "$entry/composer.json" ] && [ ! -d "$entry/vendor" ]; then
-      echo "    Installing composer dependencies for $slug..."
-      $DC exec -T -e COMPOSER_ALLOW_SUPERUSER=1 wordpress \
-        composer install --no-interaction --no-dev --working-dir="$plugin_container_path" \
-        || echo "    Warning: composer install failed for $slug, continuing anyway."
+    if [ -f "$entry" ] && [[ "$name" == *.php ]]; then
+      echo "    Copying single-file plugin $name into the container..."
+      $DC cp "$entry" "wordpress:$PLUGIN_INSTALL_DIR/$name"
+      echo "    Activating $name..."
+      $DC exec -T wordpress wp --allow-root plugin activate "$name" \
+        || echo "    Warning: could not activate '$name'."
+      continue
     fi
 
-    echo "    Activating $slug..."
-    $DC exec -T wordpress wp --allow-root plugin activate "$slug" \
-      || echo "    Warning: could not activate '$slug' (check it's a valid plugin folder/file with a main plugin header)."
+    if [ -d "$entry" ]; then
+      slug="$name"
+      echo "    Copying plugin folder $slug into the container..."
+      $DC cp "$entry" "wordpress:$PLUGIN_INSTALL_DIR/$slug"
+
+      if [ -f "$entry/composer.json" ] && [ ! -d "$entry/vendor" ]; then
+        echo "    Installing composer dependencies for $slug..."
+        $DC exec -T -e COMPOSER_ALLOW_SUPERUSER=1 wordpress \
+          composer install --no-interaction --no-dev --working-dir="$PLUGIN_INSTALL_DIR/$slug" \
+          || echo "    Warning: composer install failed for $slug, continuing anyway."
+      fi
+
+      echo "    Activating $slug..."
+      $DC exec -T wordpress wp --allow-root plugin activate "$slug" \
+        || echo "    Warning: could not activate '$slug' (check it's a valid plugin folder with a main plugin header)."
+      continue
+    fi
+
+    echo "    Warning: skipping unrecognized entry '$name' (expected .zip, .php, or a plugin folder)."
   done
 fi
 
@@ -146,8 +161,10 @@ cat <<EOF
    Username:  ${WP_ADMIN_USER}
    Password:  ${WP_ADMIN_PASSWORD}
 
-   Extra plugins:     drop a plugin .zip, folder, or single-file plugin.php into
-                       plugins/ and re-run this script to install/activate it.
+   Plugins:           drop .zip archives into plugins/ and re-run this script.
+                       Zips are installed inside the container only — nothing is
+                       extracted on the host. Folders and single .php files are
+                       copied into the container before activation.
 
    Useful commands (run from this docker/ directory):
      $DC exec wordpress wp --allow-root cron event list

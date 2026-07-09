@@ -37,12 +37,9 @@ services:
         define('WP_CRON_LOCK_TIMEOUT', 30);
     volumes:
       - wordpress_data:/var/www/html
-      # Anything placed in plugins/ (a .zip, a plugin folder, or a loose
-      # single-file plugin .php) shows up under wp-content/plugins and gets
-      # auto-installed/activated by wp.sh (zips are unzipped via WP-CLI).
-      # This replaces whatever plugins WordPress core seeds by default (e.g.
-      # Hello Dolly/Akismet) — fine for a generic plugin test stack.
-      - ./plugins:/var/www/html/wp-content/plugins
+      # Host plugins/ holds .zip archives only (read-only). wp.sh installs them
+      # into wp-content/plugins inside the container without extracting on the host.
+      - ./plugins:/var/plugin-zips:ro
 
 volumes:
   db_data:
