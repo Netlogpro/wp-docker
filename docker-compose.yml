@@ -42,6 +42,9 @@ services:
       - ./plugins:/var/plugin-zips:ro
       # Host mu-plugins/ holds must-use plugin archives/files (read-only staging).
       - ./mu-plugins:/var/mu-plugin-zips:ro
+      # Host themes/ holds theme archives (read-only). wp.sh installs them inside
+      # the container without extracting on the host.
+      - ./themes:/var/theme-zips:ro
 
 volumes:
   db_data:

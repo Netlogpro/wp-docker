@@ -4,6 +4,8 @@
 # copies plugin .zip archives from plugins/ into the container, then extracts
 # and activates them there (host plugins/ stays zip-only). Must-use plugins from
 # mu-plugins/ are deployed to wp-content/mu-plugins/ inside the container.
+# Themes from themes/ are installed inside the container; set WP_DEFAULT_THEME
+# in .env to activate a specific theme slug after install.
 #
 # Usage:
 #   ./wp.sh          # build/start everything and configure WordPress
@@ -21,7 +23,7 @@ else
   DC="docker-compose"
 fi
 
-mkdir -p plugins mu-plugins
+mkdir -p plugins mu-plugins themes
 
 if [ ! -f .env ]; then
   cp .env.example .env
@@ -203,6 +205,56 @@ else
   done
 fi
 
+echo "==> Installing themes from themes/ ..."
+THEME_ZIPS_DIR=/var/theme-zips
+THEME_INSTALL_DIR=/var/www/html/wp-content/themes
+
+shopt -s nullglob
+theme_entries=(themes/*)
+shopt -u nullglob
+if [ ${#theme_entries[@]} -eq 0 ]; then
+  echo "    None found (themes/ is empty)."
+else
+  for entry in "${theme_entries[@]}"; do
+    name="$(basename "$entry")"
+
+    if [[ "$name" == .* ]]; then
+      continue
+    fi
+
+    if [ -f "$entry" ] && [[ "$name" == *.zip ]]; then
+      echo "    Installing $name from archive (extract inside container)..."
+      $DC exec -T wordpress wp --allow-root theme install "$THEME_ZIPS_DIR/$name" --force \
+        || echo "    Warning: could not install '$name' (is it a valid WordPress theme zip?)."
+      continue
+    fi
+
+    if [ -d "$entry" ]; then
+      slug="$name"
+      echo "    Copying theme folder $slug into the container..."
+      $DC cp "$entry" "wordpress:$THEME_INSTALL_DIR/$slug"
+
+      if [ -f "$entry/composer.json" ] && [ ! -d "$entry/vendor" ]; then
+        echo "    Installing composer dependencies for $slug..."
+        $DC exec -T -e COMPOSER_ALLOW_SUPERUSER=1 wordpress \
+          composer install --no-interaction --no-dev --working-dir="$THEME_INSTALL_DIR/$slug" \
+          || echo "    Warning: composer install failed for $slug, continuing anyway."
+      fi
+      continue
+    fi
+
+    echo "    Warning: skipping unrecognized entry '$name' (expected .zip or a theme folder)."
+  done
+fi
+
+if [ -n "${WP_DEFAULT_THEME:-}" ]; then
+  echo "==> Activating default theme: ${WP_DEFAULT_THEME} ..."
+  $DC exec -T wordpress wp --allow-root theme activate "$WP_DEFAULT_THEME" \
+    || echo "    Warning: could not activate theme '${WP_DEFAULT_THEME}' (check the slug matches the theme folder name)."
+else
+  echo "==> Skipping theme activation (WP_DEFAULT_THEME is not set)."
+fi
+
 cat <<EOF
 
 ================================================================
@@ -212,6 +264,11 @@ cat <<EOF
    wp-admin:  http://localhost:${WORDPRESS_PORT}/wp-admin/
    Username:  ${WP_ADMIN_USER}
    Password:  ${WP_ADMIN_PASSWORD}
+
+   Themes:            drop .zip archives or theme folders into themes/ and re-run
+                       this script. Zips are installed inside the container only.
+                       Set WP_DEFAULT_THEME in .env to the theme slug (folder name)
+                       to activate one; leave blank to keep the current theme.
 
    Must-use plugins:  drop .zip archives, folders, or .php files into mu-plugins/.
                        They are copied/extracted into wp-content/mu-plugins/ inside

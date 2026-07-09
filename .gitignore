@@ -8,3 +8,7 @@
 # Must-use plugin archives / files (keep the folder itself)
 /mu-plugins/*
 !/mu-plugins/.gitkeep
+
+# Theme archives / folders (keep the folder itself)
+/themes/*
+!/themes/.gitkeep
