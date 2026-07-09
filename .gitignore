@@ -4,3 +4,7 @@
 # Extra plugin archives dropped into the test stack (keep the folder itself)
 /plugins/*
 !/plugins/.gitkeep
+
+# Must-use plugin archives / files (keep the folder itself)
+/mu-plugins/*
+!/mu-plugins/.gitkeep

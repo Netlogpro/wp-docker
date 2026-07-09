@@ -2,7 +2,8 @@
 #
 # Spins up a throwaway WordPress + MySQL stack in Docker, installs WordPress,
 # copies plugin .zip archives from plugins/ into the container, then extracts
-# and activates them there (host plugins/ stays zip-only).
+# and activates them there (host plugins/ stays zip-only). Must-use plugins from
+# mu-plugins/ are deployed to wp-content/mu-plugins/ inside the container.
 #
 # Usage:
 #   ./wp.sh          # build/start everything and configure WordPress
@@ -20,7 +21,7 @@ else
   DC="docker-compose"
 fi
 
-mkdir -p plugins
+mkdir -p plugins mu-plugins
 
 if [ ! -f .env ]; then
   cp .env.example .env
@@ -151,6 +152,57 @@ else
   done
 fi
 
+echo "==> Installing must-use plugins from mu-plugins/ ..."
+MU_PLUGIN_ZIPS_DIR=/var/mu-plugin-zips
+MU_PLUGIN_INSTALL_DIR=/var/www/html/wp-content/mu-plugins
+
+shopt -s nullglob
+mu_plugin_entries=(mu-plugins/*)
+shopt -u nullglob
+if [ ${#mu_plugin_entries[@]} -eq 0 ]; then
+  echo "    None found (mu-plugins/ is empty)."
+else
+  for entry in "${mu_plugin_entries[@]}"; do
+    name="$(basename "$entry")"
+
+    if [[ "$name" == .* ]]; then
+      continue
+    fi
+
+    if [ -f "$entry" ] && [[ "$name" == *.zip ]]; then
+      echo "    Extracting $name into mu-plugins (inside container)..."
+      $DC exec -T wordpress bash -lc \
+        "mkdir -p '$MU_PLUGIN_INSTALL_DIR' && unzip -oq '$MU_PLUGIN_ZIPS_DIR/$name' -d '$MU_PLUGIN_INSTALL_DIR'" \
+        || echo "    Warning: could not extract '$name' (is it a valid zip archive?)."
+      continue
+    fi
+
+    if [ -f "$entry" ] && [[ "$name" == *.php ]]; then
+      echo "    Copying must-use plugin $name into the container..."
+      $DC exec -T wordpress mkdir -p "$MU_PLUGIN_INSTALL_DIR"
+      $DC cp "$entry" "wordpress:$MU_PLUGIN_INSTALL_DIR/$name"
+      continue
+    fi
+
+    if [ -d "$entry" ]; then
+      slug="$name"
+      echo "    Copying must-use plugin folder $slug into the container..."
+      $DC exec -T wordpress mkdir -p "$MU_PLUGIN_INSTALL_DIR"
+      $DC cp "$entry" "wordpress:$MU_PLUGIN_INSTALL_DIR/$slug"
+
+      if [ -f "$entry/composer.json" ] && [ ! -d "$entry/vendor" ]; then
+        echo "    Installing composer dependencies for $slug..."
+        $DC exec -T -e COMPOSER_ALLOW_SUPERUSER=1 wordpress \
+          composer install --no-interaction --no-dev --working-dir="$MU_PLUGIN_INSTALL_DIR/$slug" \
+          || echo "    Warning: composer install failed for $slug, continuing anyway."
+      fi
+      continue
+    fi
+
+    echo "    Warning: skipping unrecognized entry '$name' (expected .zip, .php, or a plugin folder)."
+  done
+fi
+
 cat <<EOF
 
 ================================================================
@@ -160,6 +212,10 @@ cat <<EOF
    wp-admin:  http://localhost:${WORDPRESS_PORT}/wp-admin/
    Username:  ${WP_ADMIN_USER}
    Password:  ${WP_ADMIN_PASSWORD}
+
+   Must-use plugins:  drop .zip archives, folders, or .php files into mu-plugins/.
+                       They are copied/extracted into wp-content/mu-plugins/ inside
+                       the container and load automatically (no activation step).
 
    Plugins:           drop .zip archives into plugins/ and re-run this script.
                        Zips are installed inside the container only — nothing is
