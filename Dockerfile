@@ -1,9 +1,9 @@
 # Test/dev image for WordPress.
 #
-# Extends the official WordPress image (Apache + PHP 8.2) with Composer and
-# WP-CLI so wp.sh can install plugins and drive WordPress from the host
-# without anything else installed locally besides Docker.
-FROM wordpress:php8.2-apache
+# Pinned to WordPress 7.0.0 + PHP 8.2 + Apache. Adds Composer and WP-CLI
+# so wp.sh can install plugins and drive WordPress from the host.
+ARG WORDPRESS_IMAGE=wordpress:7.0.0-php8.2-apache
+FROM ${WORDPRESS_IMAGE}
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \

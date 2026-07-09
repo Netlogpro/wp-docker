@@ -19,6 +19,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        WORDPRESS_IMAGE: ${WORDPRESS_IMAGE:-wordpress:7.0.0-php8.2-apache}
     depends_on:
       db:
         condition: service_healthy

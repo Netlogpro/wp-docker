@@ -41,6 +41,24 @@ WP_ADMIN_USER="${WP_ADMIN_USER:-admin}"
 WP_ADMIN_PASSWORD="${WP_ADMIN_PASSWORD:-admin}"
 WP_ADMIN_EMAIL="${WP_ADMIN_EMAIL:-admin@example.com}"
 
+# Resolved site URL: explicit WP_SITE_URL or localhost fallback.
+if [ -n "${WP_SITE_URL:-}" ]; then
+  WP_SITE_URL_RESOLVED="${WP_SITE_URL%/}"
+  if [[ "$WP_SITE_URL_RESOLVED" != *://* ]]; then
+    WP_SITE_URL_RESOLVED="http://${WP_SITE_URL_RESOLVED}"
+  fi
+  # Append WORDPRESS_PORT when omitted and not the default HTTP port.
+  if [[ ! "$WP_SITE_URL_RESOLVED" =~ ^https?://[^/:]+:[0-9]+ ]] && [ "$WORDPRESS_PORT" != "80" ]; then
+    if [[ "$WP_SITE_URL_RESOLVED" =~ ^(https?://[^/]+)(/.*)$ ]]; then
+      WP_SITE_URL_RESOLVED="${BASH_REMATCH[1]}:${WORDPRESS_PORT}${BASH_REMATCH[2]}"
+    else
+      WP_SITE_URL_RESOLVED="${WP_SITE_URL_RESOLVED}:${WORDPRESS_PORT}"
+    fi
+  fi
+else
+  WP_SITE_URL_RESOLVED="http://localhost:${WORDPRESS_PORT}"
+fi
+
 if [ "${1:-}" = "down" ]; then
   echo "==> Stopping containers (volumes kept)..."
   $DC down
@@ -84,7 +102,7 @@ echo "==> Checking WordPress core installation..."
 if ! $DC exec -T wordpress wp --allow-root core is-installed >/dev/null 2>&1; then
   echo "==> Installing WordPress core..."
   $DC exec -T wordpress wp --allow-root core install \
-    --url="http://localhost:${WORDPRESS_PORT}" \
+    --url="${WP_SITE_URL_RESOLVED}" \
     --title="${WP_SITE_TITLE}" \
     --admin_user="${WP_ADMIN_USER}" \
     --admin_password="${WP_ADMIN_PASSWORD}" \
@@ -92,6 +110,11 @@ if ! $DC exec -T wordpress wp --allow-root core is-installed >/dev/null 2>&1; th
     --skip-email
 else
   echo "    Already installed, skipping."
+  if [ -n "${WP_SITE_URL:-}" ]; then
+    echo "==> Updating WordPress site URL to ${WP_SITE_URL_RESOLVED} ..."
+    $DC exec -T wordpress wp --allow-root option update siteurl "$WP_SITE_URL_RESOLVED"
+    $DC exec -T wordpress wp --allow-root option update home "$WP_SITE_URL_RESOLVED"
+  fi
 fi
 
 echo "==> Setting pretty permalinks..."
@@ -260,10 +283,15 @@ cat <<EOF
 ================================================================
  WordPress test environment is ready!
 
-   Site:      http://localhost:${WORDPRESS_PORT}/
-   wp-admin:  http://localhost:${WORDPRESS_PORT}/wp-admin/
+   Site:      ${WP_SITE_URL_RESOLVED}/
+   wp-admin:  ${WP_SITE_URL_RESOLVED}/wp-admin/
    Username:  ${WP_ADMIN_USER}
    Password:  ${WP_ADMIN_PASSWORD}
+$(if [ -n "${WP_SITE_URL:-}" ] && [[ "$WP_SITE_URL_RESOLVED" != *"localhost"* ]]; then
+  echo ""
+  echo "   Hosts file:  map the domain on your machine, e.g."
+  echo "                127.0.0.1  $(echo "$WP_SITE_URL_RESOLVED" | sed -E 's#^[a-zA-Z]+://([^/:]+).*#\1#')"
+fi)
 
    Themes:            drop .zip archives or theme folders into themes/ and re-run
                        this script. Zips are installed inside the container only.
