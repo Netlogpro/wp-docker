@@ -17,6 +17,7 @@
 #   ./wp.sh shell            # open an interactive shell in the container
 #   ./wp.sh sync             # re-apply plugins, mu-plugins, themes, and wp-config
 #   ./wp.sh phpmyadmin       # same as ./wp.sh, plus start phpMyAdmin
+#   ./wp.sh logs             # follow WordPress container logs
 #   ./wp.sh help             # show usage
 #
 set -euo pipefail
@@ -342,12 +343,14 @@ Usage:
   ./wp.sh shell            Open an interactive shell in the container
   ./wp.sh sync             Re-apply plugins, mu-plugins, themes, and wp-config
   ./wp.sh phpmyadmin       Full WordPress setup plus phpMyAdmin
+  ./wp.sh logs             Follow WordPress container logs
   ./wp.sh help             Show this help
 
 Examples:
   ./wp.sh sync
   ./wp.sh shell
   ./wp.sh phpmyadmin
+  ./wp.sh logs
   ./wp.sh wp plugin list
   ./wp.sh exec ls -la /var/www/html/wp-content/plugins
 EOF
@@ -415,6 +418,11 @@ fi
 
 if [ "${1:-}" = "shell" ]; then
   open_shell
+  exit 0
+fi
+
+if [ "${1:-}" = "logs" ]; then
+  $DC logs -f wordpress
   exit 0
 fi
 
@@ -527,7 +535,7 @@ fi)
      ./wp.sh phpmyadmin  # full setup plus phpMyAdmin
      ./wp.sh wp plugin list
      ./wp.sh exec ls -la /var/www/html/wp-content/plugins
-     $DC logs -f wordpress
+     ./wp.sh logs        # follow WordPress container logs
      ./wp.sh down    # stop containers, keep data
      ./wp.sh reset   # stop containers and wipe all data
      ./wp.sh help    # show all commands
