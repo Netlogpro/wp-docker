@@ -9,9 +9,14 @@
 # via .env constants and config/wp-config.extra.php (see sync_wp_config).
 #
 # Usage:
-#   ./wp.sh          # build/start everything and configure WordPress
-#   ./wp.sh down     # stop and remove containers (keeps volumes)
-#   ./wp.sh reset    # stop and remove containers AND volumes (full wipe)
+#   ./wp.sh                  # build/start everything and configure WordPress
+#   ./wp.sh down             # stop and remove containers (keeps volumes)
+#   ./wp.sh reset            # stop and remove containers AND volumes (full wipe)
+#   ./wp.sh exec [cmd ...]   # run a command in the WordPress container
+#   ./wp.sh wp [args ...]    # run WP-CLI (wp --allow-root) in the container
+#   ./wp.sh shell            # open an interactive shell in the container
+#   ./wp.sh terminal         # same as shell — connect to the container terminal
+#   ./wp.sh help             # show usage
 #
 set -euo pipefail
 
@@ -115,6 +120,52 @@ sync_wp_config() {
   set_wp_config_from_env WP_POST_REVISIONS WP_POST_REVISIONS
 }
 
+show_usage() {
+  cat <<'EOF'
+Usage:
+  ./wp.sh                  Build/start and configure WordPress
+  ./wp.sh down             Stop containers (keep volumes)
+  ./wp.sh reset            Stop containers and delete volumes
+  ./wp.sh exec [cmd ...]   Run a command in the WordPress container
+  ./wp.sh wp [args ...]    Run WP-CLI (wp --allow-root) in the container
+  ./wp.sh shell            Open an interactive shell in the container
+  ./wp.sh terminal         Connect to the container terminal (alias for shell)
+  ./wp.sh help             Show this help
+
+Examples:
+  ./wp.sh wp plugin list
+  ./wp.sh wp option get siteurl
+  ./wp.sh exec ls -la /var/www/html/wp-content/plugins
+  ./wp.sh terminal
+EOF
+}
+
+require_container() {
+  if ! $DC ps --status running --services 2>/dev/null | grep -qx wordpress; then
+    echo "WordPress container is not running. Start it with: ./wp.sh" >&2
+    exit 1
+  fi
+}
+
+container_exec() {
+  require_container
+  if [ -t 0 ] && [ -t 1 ]; then
+    $DC exec wordpress "$@"
+  else
+    $DC exec -T wordpress "$@"
+  fi
+}
+
+open_terminal() {
+  require_container
+  $DC exec wordpress bash
+}
+
+if [ "${1:-}" = "help" ] || [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+  show_usage
+  exit 0
+fi
+
 if [ "${1:-}" = "down" ]; then
   echo "==> Stopping containers (volumes kept)..."
   $DC down
@@ -124,6 +175,32 @@ fi
 if [ "${1:-}" = "reset" ]; then
   echo "==> Stopping containers and deleting volumes (full wipe)..."
   $DC down -v
+  exit 0
+fi
+
+if [ "${1:-}" = "exec" ]; then
+  shift
+  if [ $# -eq 0 ]; then
+    open_terminal
+  else
+    container_exec "$@"
+  fi
+  exit 0
+fi
+
+if [ "${1:-}" = "wp" ]; then
+  shift
+  if [ $# -eq 0 ]; then
+    echo "Usage: ./wp.sh wp <wp-cli-args...>" >&2
+    echo "Example: ./wp.sh wp plugin list" >&2
+    exit 1
+  fi
+  container_exec wp --allow-root "$@"
+  exit 0
+fi
+
+if [ "${1:-}" = "shell" ] || [ "${1:-}" = "bash" ] || [ "${1:-}" = "terminal" ]; then
+  open_terminal
   exit 0
 fi
 
@@ -371,10 +448,13 @@ fi)
                        config/wp-config.d/.
 
    Useful commands (run from this docker/ directory):
-     $DC exec wordpress wp --allow-root cron event list
-     $DC exec wordpress wp --allow-root cron event run --due-now
+     ./wp.sh wp plugin list
+     ./wp.sh wp cron event run --due-now
+     ./wp.sh exec ls -la /var/www/html/wp-content/plugins
+     ./wp.sh terminal
      $DC logs -f wordpress
      ./wp.sh down    # stop containers, keep data
      ./wp.sh reset   # stop containers and wipe all data
+     ./wp.sh help    # show all commands
 ================================================================
 EOF
