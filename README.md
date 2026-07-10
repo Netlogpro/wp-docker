@@ -71,6 +71,8 @@ docker/
 ./wp.sh wp [args ...]    # Run WP-CLI (wp --allow-root) in the container
 ./wp.sh shell            # Open an interactive shell in the container
 ./wp.sh sync             # Re-apply plugins, mu-plugins, themes, and wp-config
+./wp.sh phpmyadmin       # Full WordPress setup plus phpMyAdmin
+./wp.sh logs             # Follow WordPress container logs
 ./wp.sh help             # Show usage
 ```
 
@@ -81,6 +83,7 @@ docker/
 | `./wp.sh shell` | Interactive bash session in the WordPress container |
 | `./wp.sh exec <cmd>` | Run a single command (non-interactive or with TTY when attached) |
 | `./wp.sh wp <args>` | WP-CLI shorthand (`wp --allow-root`) |
+| `./wp.sh logs` | Follow WordPress container logs (`docker compose logs -f wordpress`) |
 
 Containers must be running (start with `./wp.sh` if needed).
 
@@ -119,10 +122,35 @@ This will:
 
 Folder-based plugins, mu-plugins, and themes are fully replaced in the container on each sync.
 
+### phpMyAdmin
+
+Run the full WordPress setup **and** start phpMyAdmin:
+
+```bash
+./wp.sh phpmyadmin
+```
+
+This does everything `./wp.sh` does (build, install WordPress, sync plugins/themes/config), plus starts phpMyAdmin on a separate port.
+
+| Service | Default URL | Port env |
+|---|---|---|
+| **WordPress** | `http://localhost:8080` | `WORDPRESS_PORT` |
+| **phpMyAdmin** | `http://localhost:8081` | `PHPMYADMIN_PORT` |
+
+`PHPMYADMIN_PORT` **must** differ from `WORDPRESS_PORT` (validated by `./wp.sh phpmyadmin`).
+
+| phpMyAdmin login | Default |
+|---|---|
+| **Server** | `db` |
+| **Root user** | `root` / `MYSQL_ROOT_PASSWORD` from `.env` |
+| **WP DB user** | `wordpress` / `WORDPRESS_DB_PASSWORD` from `.env` |
+
+phpMyAdmin is only started when you run `./wp.sh phpmyadmin` (which runs the full setup). A normal `./wp.sh` starts `db` and `wordpress` only, so there is no port conflict and no orphan-container warnings. `./wp.sh down` and `./wp.sh reset` stop whatever is currently running.
+
 ### Docker Compose shortcuts
 
 ```bash
-docker compose logs -f wordpress
+./wp.sh logs
 docker compose exec wordpress wp --allow-root config get WP_DEBUG
 ```
 
@@ -134,7 +162,8 @@ Copy `.env.example` to `.env` (done automatically on first run) and edit as need
 
 | Variable | Default | Description |
 |---|---|---|
-| `WORDPRESS_PORT` | `8080` | Host port mapped to container port 80 |
+| `WORDPRESS_PORT` | `8080` | Host port mapped to WordPress container port 80 |
+| `PHPMYADMIN_PORT` | `8081` | Host port for phpMyAdmin — must differ from `WORDPRESS_PORT` |
 | `WORDPRESS_IMAGE` | `wordpress:7.0.0-php8.2-apache` | Base WordPress Docker image tag |
 
 ### Database
@@ -333,7 +362,7 @@ Change `WORDPRESS_PORT` in `.env` (e.g. `8081`) and re-run `./wp.sh`.
 ### Plugin or theme zip fails to install
 
 - Ensure the zip is a valid WordPress plugin/theme archive
-- Check logs: `docker compose logs wordpress`
+- Check logs: `./wp.sh logs`
 - Verify the folder name inside the zip matches the expected slug
 
 ### wp-config changes not applied
