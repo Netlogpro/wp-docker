@@ -16,6 +16,7 @@
 #   ./wp.sh wp [args ...]    # run WP-CLI (wp --allow-root) in the container
 #   ./wp.sh shell            # open an interactive shell in the container
 #   ./wp.sh sync             # re-apply plugins, mu-plugins, themes, and wp-config
+#   ./wp.sh phpmyadmin       # same as ./wp.sh, plus start phpMyAdmin
 #   ./wp.sh help             # show usage
 #
 set -euo pipefail
@@ -47,6 +48,7 @@ source .env
 set +a
 
 WORDPRESS_PORT="${WORDPRESS_PORT:-8080}"
+PHPMYADMIN_PORT="${PHPMYADMIN_PORT:-8081}"
 WP_SITE_TITLE="${WP_SITE_TITLE:-Test Site}"
 WP_ADMIN_USER="${WP_ADMIN_USER:-admin}"
 WP_ADMIN_PASSWORD="${WP_ADMIN_PASSWORD:-admin}"
@@ -339,11 +341,13 @@ Usage:
   ./wp.sh wp [args ...]    Run WP-CLI (wp --allow-root) in the container
   ./wp.sh shell            Open an interactive shell in the container
   ./wp.sh sync             Re-apply plugins, mu-plugins, themes, and wp-config
+  ./wp.sh phpmyadmin       Full WordPress setup plus phpMyAdmin
   ./wp.sh help             Show this help
 
 Examples:
   ./wp.sh sync
   ./wp.sh shell
+  ./wp.sh phpmyadmin
   ./wp.sh wp plugin list
   ./wp.sh exec ls -la /var/www/html/wp-content/plugins
 EOF
@@ -416,7 +420,7 @@ fi
 
 if [ "${1:-}" = "sync" ]; then
   echo "==> Ensuring containers are running..."
-  $DC up -d
+  $DC up -d db wordpress
   wait_for_database
   wait_for_wordpress
   run_sync
@@ -424,8 +428,25 @@ if [ "${1:-}" = "sync" ]; then
   exit 0
 fi
 
+WITH_PHPMYADMIN=false
+if [ "${1:-}" = "phpmyadmin" ]; then
+  WITH_PHPMYADMIN=true
+fi
+
+if [ "$WITH_PHPMYADMIN" = true ]; then
+  if [ "$PHPMYADMIN_PORT" = "$WORDPRESS_PORT" ]; then
+    echo "Error: PHPMYADMIN_PORT (${PHPMYADMIN_PORT}) must differ from WORDPRESS_PORT (${WORDPRESS_PORT})." >&2
+    echo "Set a free port in .env, e.g. PHPMYADMIN_PORT=8081" >&2
+    exit 1
+  fi
+fi
+
 echo "==> Building and starting containers..."
-$DC up -d --build
+if [ "$WITH_PHPMYADMIN" = true ]; then
+  $DC up -d --build db wordpress phpmyadmin
+else
+  $DC up -d --build db wordpress
+fi
 
 wait_for_database
 wait_for_wordpress
@@ -459,11 +480,23 @@ cat <<EOF
 
 ================================================================
  WordPress test environment is ready!
+$(if [ "$WITH_PHPMYADMIN" = true ]; then echo ""; echo "   phpMyAdmin:  http://localhost:${PHPMYADMIN_PORT}/"; fi)
 
    Site:      ${WP_SITE_URL_RESOLVED}/
    wp-admin:  ${WP_SITE_URL_RESOLVED}/wp-admin/
    Username:  ${WP_ADMIN_USER}
    Password:  ${WP_ADMIN_PASSWORD}
+$(if [ "$WITH_PHPMYADMIN" = true ]; then
+  echo ""
+  echo "   phpMyAdmin login:"
+  echo "   Server:    db"
+  echo "   Username:  root"
+  echo "   Password:  ${MYSQL_ROOT_PASSWORD:-root}"
+  echo ""
+  echo "   WordPress DB user (optional):"
+  echo "   Username:  ${WORDPRESS_DB_USER:-wordpress}"
+  echo "   Password:  ${WORDPRESS_DB_PASSWORD:-wordpress}"
+fi)
 $(if [ -n "${WP_SITE_URL:-}" ] && [[ "$WP_SITE_URL_RESOLVED" != *"localhost"* ]]; then
   echo ""
   echo "   Hosts file:  map the domain on your machine, e.g."
@@ -489,8 +522,9 @@ fi)
                        config/wp-config.d/.
 
    Useful commands (run from this docker/ directory):
-     ./wp.sh sync    # re-apply plugins, mu-plugins, themes, and wp-config
-     ./wp.sh shell   # interactive shell in the container
+     ./wp.sh sync        # re-apply plugins, mu-plugins, themes, and wp-config
+     ./wp.sh shell       # interactive shell in the container
+     ./wp.sh phpmyadmin  # full setup plus phpMyAdmin
      ./wp.sh wp plugin list
      ./wp.sh exec ls -la /var/www/html/wp-content/plugins
      $DC logs -f wordpress

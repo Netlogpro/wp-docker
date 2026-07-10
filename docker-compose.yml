@@ -50,6 +50,25 @@ services:
       # the container without extracting on the host.
       - ./themes:/var/theme-zips:ro
 
+  # Optional DB UI — only started by `./wp.sh phpmyadmin` (not on a normal ./wp.sh).
+  # Uses PHPMYADMIN_PORT on the host (default 8081), separate from WORDPRESS_PORT.
+  phpmyadmin:
+    image: phpmyadmin:5.2
+    hostname: phpmyadmin
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    ports:
+      - "${PHPMYADMIN_PORT:-8081}:80"
+    environment:
+      PMA_HOST: db
+      PMA_PORT: 3306
+      PMA_USER: root
+      PMA_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+      UPLOAD_LIMIT: 256M
+      PMA_ABSOLUTE_URI: http://localhost:${PHPMYADMIN_PORT:-8081}/
+
 volumes:
   db_data:
   wordpress_data:
