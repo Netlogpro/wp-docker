@@ -32,13 +32,15 @@ services:
       WORDPRESS_DB_NAME: ${WORDPRESS_DB_NAME:-wordpress}
       WORDPRESS_DB_USER: ${WORDPRESS_DB_USER:-wordpress}
       WORDPRESS_DB_PASSWORD: ${WORDPRESS_DB_PASSWORD:-wordpress}
-      WORDPRESS_DEBUG: 1
       WORDPRESS_CONFIG_EXTRA: |
-        define('WP_DEBUG_LOG', true);
-        define('WP_DEBUG_DISPLAY', false);
-        define('WP_CRON_LOCK_TIMEOUT', 30);
+        if (is_readable('/docker-config/bootstrap.php')) {
+            require_once '/docker-config/bootstrap.php';
+        }
     volumes:
       - wordpress_data:/var/www/html
+      # Host config/ holds wp-config snippets (read-only). wp.sh ensures they are
+      # included from wp-config.php and applies .env constants on each run.
+      - ./config:/docker-config:ro
       # Host plugins/ holds .zip archives only (read-only). wp.sh installs them
       # into wp-content/plugins inside the container without extracting on the host.
       - ./plugins:/var/plugin-zips:ro

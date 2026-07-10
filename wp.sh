@@ -5,7 +5,8 @@
 # and activates them there (host plugins/ stays zip-only). Must-use plugins from
 # mu-plugins/ are deployed to wp-content/mu-plugins/ inside the container.
 # Themes from themes/ are installed inside the container; set WP_DEFAULT_THEME
-# in .env to activate a specific theme slug after install.
+# in .env to activate a specific theme slug after install. wp-config is managed
+# via .env constants and config/wp-config.extra.php (see sync_wp_config).
 #
 # Usage:
 #   ./wp.sh          # build/start everything and configure WordPress
@@ -23,11 +24,16 @@ else
   DC="docker-compose"
 fi
 
-mkdir -p plugins mu-plugins themes
+mkdir -p plugins mu-plugins themes config/wp-config.d
 
 if [ ! -f .env ]; then
   cp .env.example .env
   echo "==> Created .env from .env.example (edit it to customize ports/credentials)."
+fi
+
+if [ ! -f config/wp-config.extra.php ]; then
+  cp config/wp-config.extra.php.example config/wp-config.extra.php
+  echo "==> Created config/wp-config.extra.php from config/wp-config.extra.php.example."
 fi
 
 set -a
@@ -58,6 +64,56 @@ if [ -n "${WP_SITE_URL:-}" ]; then
 else
   WP_SITE_URL_RESOLVED="http://localhost:${WORDPRESS_PORT}"
 fi
+
+set_wp_config_from_env() {
+  local env_var="$1"
+  local constant="$2"
+  local value="${!env_var:-}"
+
+  if [ -z "$value" ]; then
+    return 0
+  fi
+
+  case "$constant" in
+    WP_DEBUG|WP_DEBUG_LOG|WP_DEBUG_DISPLAY|DISALLOW_FILE_EDIT)
+      case "${value,,}" in
+        true|1|yes|on) value=true ;;
+        false|0|no|off) value=false ;;
+      esac
+      $DC exec -T wordpress wp --allow-root config set "$constant" "$value" --raw --type=constant \
+        || echo "    Warning: could not set ${constant}."
+      ;;
+    WP_POST_REVISIONS)
+      $DC exec -T wordpress wp --allow-root config set "$constant" "$value" --raw --type=constant \
+        || echo "    Warning: could not set ${constant}."
+      ;;
+    *)
+      $DC exec -T wordpress wp --allow-root config set "$constant" "$value" --type=constant \
+        || echo "    Warning: could not set ${constant}."
+      ;;
+  esac
+}
+
+ensure_wp_config_bootstrap() {
+  $DC exec -T wordpress bash -lc '
+    WP_CONFIG=/var/www/html/wp-config.php
+    if ! grep -q "/docker-config/bootstrap.php" "$WP_CONFIG" 2>/dev/null; then
+      sed -i "/That'\''s all, stop editing!/i if (is_readable('\''/docker-config/bootstrap.php'\'')) { require_once '\''/docker-config/bootstrap.php'\''; }" "$WP_CONFIG"
+    fi
+  '
+}
+
+sync_wp_config() {
+  echo "==> Syncing wp-config from .env and config/ ..."
+  ensure_wp_config_bootstrap
+  set_wp_config_from_env WP_DEBUG WP_DEBUG
+  set_wp_config_from_env WP_DEBUG_LOG WP_DEBUG_LOG
+  set_wp_config_from_env WP_DEBUG_DISPLAY WP_DEBUG_DISPLAY
+  set_wp_config_from_env WP_MEMORY_LIMIT WP_MEMORY_LIMIT
+  set_wp_config_from_env WP_MAX_MEMORY_LIMIT WP_MAX_MEMORY_LIMIT
+  set_wp_config_from_env DISALLOW_FILE_EDIT DISALLOW_FILE_EDIT
+  set_wp_config_from_env WP_POST_REVISIONS WP_POST_REVISIONS
+}
 
 if [ "${1:-}" = "down" ]; then
   echo "==> Stopping containers (volumes kept)..."
@@ -120,6 +176,8 @@ fi
 echo "==> Setting pretty permalinks..."
 $DC exec -T wordpress wp --allow-root rewrite structure '/%postname%/'
 $DC exec -T wordpress wp --allow-root rewrite flush --hard
+
+sync_wp_config
 
 echo "==> Installing/activating plugins from plugins/ ..."
 PLUGIN_ZIPS_DIR=/var/plugin-zips
@@ -306,6 +364,11 @@ fi)
                        Zips are installed inside the container only — nothing is
                        extracted on the host. Folders and single .php files are
                        copied into the container before activation.
+
+   wp-config:         set common constants in .env (WP_DEBUG, WP_MEMORY_LIMIT,
+                       etc.) and re-run this script. For advanced PHP overrides,
+                       edit config/wp-config.extra.php or add snippets under
+                       config/wp-config.d/.
 
    Useful commands (run from this docker/ directory):
      $DC exec wordpress wp --allow-root cron event list

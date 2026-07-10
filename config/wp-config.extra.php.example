@@ -1,0 +1,9 @@
+<?php
+/**
+ * Advanced wp-config overrides for local Docker.
+ *
+ * Copy to wp-config.extra.php and customize (wp-config.extra.php is gitignored).
+ * Loaded on every request via config/bootstrap.php.
+ */
+
+define('WP_CRON_LOCK_TIMEOUT', 30);

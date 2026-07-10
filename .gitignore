@@ -12,3 +12,8 @@
 # Theme archives / folders (keep the folder itself)
 /themes/*
 !/themes/.gitkeep
+
+# wp-config local overrides (tracked templates live in config/)
+/config/wp-config.extra.php
+/config/wp-config.d/*
+!/config/wp-config.d/.gitkeep
