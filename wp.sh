@@ -12,10 +12,10 @@
 #   ./wp.sh                  # build/start everything and configure WordPress
 #   ./wp.sh down             # stop and remove containers (keeps volumes)
 #   ./wp.sh reset            # stop and remove containers AND volumes (full wipe)
-#   ./wp.sh exec [cmd ...]   # run a command in the WordPress container
+#   ./wp.sh exec <cmd ...>   # run a command in the WordPress container
 #   ./wp.sh wp [args ...]    # run WP-CLI (wp --allow-root) in the container
 #   ./wp.sh shell            # open an interactive shell in the container
-#   ./wp.sh terminal         # same as shell — connect to the container terminal
+#   ./wp.sh sync             # re-apply plugins, mu-plugins, themes, and wp-config
 #   ./wp.sh help             # show usage
 #
 set -euo pipefail
@@ -120,23 +120,232 @@ sync_wp_config() {
   set_wp_config_from_env WP_POST_REVISIONS WP_POST_REVISIONS
 }
 
+wait_for_database() {
+  echo "==> Waiting for the database to become healthy..."
+  local attempts=0
+  until [ "$(docker inspect -f '{{.State.Health.Status}}' "$($DC ps -q db)" 2>/dev/null)" = "healthy" ]; do
+    attempts=$((attempts + 1))
+    if [ "$attempts" -gt 60 ]; then
+      echo "Database did not become healthy in time." >&2
+      $DC logs db
+      exit 1
+    fi
+    sleep 2
+  done
+}
+
+wait_for_wordpress() {
+  echo "==> Waiting for the WordPress container to respond..."
+  local attempts=0
+  until $DC exec -T wordpress wp --allow-root cli info >/dev/null 2>&1; do
+    attempts=$((attempts + 1))
+    if [ "$attempts" -gt 60 ]; then
+      echo "WordPress container did not become ready in time." >&2
+      $DC logs wordpress
+      exit 1
+    fi
+    sleep 2
+  done
+}
+
+sync_plugins() {
+  echo "==> Syncing plugins from plugins/ ..."
+  local plugin_zips_dir=/var/plugin-zips
+  local plugin_install_dir=/var/www/html/wp-content/plugins
+
+  shopt -s nullglob
+  local plugin_entries=(plugins/*)
+  shopt -u nullglob
+  if [ ${#plugin_entries[@]} -eq 0 ]; then
+    echo "    None found (plugins/ is empty)."
+    return 0
+  fi
+
+  for entry in "${plugin_entries[@]}"; do
+    local name
+    name="$(basename "$entry")"
+
+    if [[ "$name" == .* ]]; then
+      continue
+    fi
+
+    if [ -f "$entry" ] && [[ "$name" == *.zip ]]; then
+      echo "    Installing $name from archive (extract inside container)..."
+      $DC exec -T wordpress wp --allow-root plugin install "$plugin_zips_dir/$name" --activate --force \
+        || echo "    Warning: could not install '$name' (is it a valid WordPress plugin zip?)."
+      continue
+    fi
+
+    if [ -f "$entry" ] && [[ "$name" == *.php ]]; then
+      echo "    Copying single-file plugin $name into the container..."
+      $DC cp "$entry" "wordpress:$plugin_install_dir/$name"
+      echo "    Activating $name..."
+      $DC exec -T wordpress wp --allow-root plugin activate "$name" \
+        || echo "    Warning: could not activate '$name'."
+      continue
+    fi
+
+    if [ -d "$entry" ]; then
+      local slug="$name"
+      echo "    Syncing plugin folder $slug into the container..."
+      $DC exec -T wordpress rm -rf "$plugin_install_dir/$slug"
+      $DC cp "$entry" "wordpress:$plugin_install_dir/$slug"
+
+      if [ -f "$entry/composer.json" ] && [ ! -d "$entry/vendor" ]; then
+        echo "    Installing composer dependencies for $slug..."
+        $DC exec -T -e COMPOSER_ALLOW_SUPERUSER=1 wordpress \
+          composer install --no-interaction --no-dev --working-dir="$plugin_install_dir/$slug" \
+          || echo "    Warning: composer install failed for $slug, continuing anyway."
+      fi
+
+      echo "    Activating $slug..."
+      $DC exec -T wordpress wp --allow-root plugin activate "$slug" \
+        || echo "    Warning: could not activate '$slug' (check it's a valid plugin folder with a main plugin header)."
+      continue
+    fi
+
+    echo "    Warning: skipping unrecognized entry '$name' (expected .zip, .php, or a plugin folder)."
+  done
+}
+
+sync_mu_plugins() {
+  echo "==> Syncing must-use plugins from mu-plugins/ ..."
+  local mu_plugin_zips_dir=/var/mu-plugin-zips
+  local mu_plugin_install_dir=/var/www/html/wp-content/mu-plugins
+
+  shopt -s nullglob
+  local mu_plugin_entries=(mu-plugins/*)
+  shopt -u nullglob
+  if [ ${#mu_plugin_entries[@]} -eq 0 ]; then
+    echo "    None found (mu-plugins/ is empty)."
+    return 0
+  fi
+
+  for entry in "${mu_plugin_entries[@]}"; do
+    local name
+    name="$(basename "$entry")"
+
+    if [[ "$name" == .* ]]; then
+      continue
+    fi
+
+    if [ -f "$entry" ] && [[ "$name" == *.zip ]]; then
+      echo "    Extracting $name into mu-plugins (inside container)..."
+      $DC exec -T wordpress bash -lc \
+        "mkdir -p '$mu_plugin_install_dir' && unzip -oq '$mu_plugin_zips_dir/$name' -d '$mu_plugin_install_dir'" \
+        || echo "    Warning: could not extract '$name' (is it a valid zip archive?)."
+      continue
+    fi
+
+    if [ -f "$entry" ] && [[ "$name" == *.php ]]; then
+      echo "    Copying must-use plugin $name into the container..."
+      $DC exec -T wordpress mkdir -p "$mu_plugin_install_dir"
+      $DC cp "$entry" "wordpress:$mu_plugin_install_dir/$name"
+      continue
+    fi
+
+    if [ -d "$entry" ]; then
+      local slug="$name"
+      echo "    Syncing must-use plugin folder $slug into the container..."
+      $DC exec -T wordpress mkdir -p "$mu_plugin_install_dir"
+      $DC exec -T wordpress rm -rf "$mu_plugin_install_dir/$slug"
+      $DC cp "$entry" "wordpress:$mu_plugin_install_dir/$slug"
+
+      if [ -f "$entry/composer.json" ] && [ ! -d "$entry/vendor" ]; then
+        echo "    Installing composer dependencies for $slug..."
+        $DC exec -T -e COMPOSER_ALLOW_SUPERUSER=1 wordpress \
+          composer install --no-interaction --no-dev --working-dir="$mu_plugin_install_dir/$slug" \
+          || echo "    Warning: composer install failed for $slug, continuing anyway."
+      fi
+      continue
+    fi
+
+    echo "    Warning: skipping unrecognized entry '$name' (expected .zip, .php, or a plugin folder)."
+  done
+}
+
+sync_themes() {
+  echo "==> Syncing themes from themes/ ..."
+  local theme_zips_dir=/var/theme-zips
+  local theme_install_dir=/var/www/html/wp-content/themes
+
+  shopt -s nullglob
+  local theme_entries=(themes/*)
+  shopt -u nullglob
+  if [ ${#theme_entries[@]} -eq 0 ]; then
+    echo "    None found (themes/ is empty)."
+    return 0
+  fi
+
+  for entry in "${theme_entries[@]}"; do
+    local name
+    name="$(basename "$entry")"
+
+    if [[ "$name" == .* ]]; then
+      continue
+    fi
+
+    if [ -f "$entry" ] && [[ "$name" == *.zip ]]; then
+      echo "    Installing $name from archive (extract inside container)..."
+      $DC exec -T wordpress wp --allow-root theme install "$theme_zips_dir/$name" --force \
+        || echo "    Warning: could not install '$name' (is it a valid WordPress theme zip?)."
+      continue
+    fi
+
+    if [ -d "$entry" ]; then
+      local slug="$name"
+      echo "    Syncing theme folder $slug into the container..."
+      $DC exec -T wordpress rm -rf "$theme_install_dir/$slug"
+      $DC cp "$entry" "wordpress:$theme_install_dir/$slug"
+
+      if [ -f "$entry/composer.json" ] && [ ! -d "$entry/vendor" ]; then
+        echo "    Installing composer dependencies for $slug..."
+        $DC exec -T -e COMPOSER_ALLOW_SUPERUSER=1 wordpress \
+          composer install --no-interaction --no-dev --working-dir="$theme_install_dir/$slug" \
+          || echo "    Warning: composer install failed for $slug, continuing anyway."
+      fi
+      continue
+    fi
+
+    echo "    Warning: skipping unrecognized entry '$name' (expected .zip or a theme folder)."
+  done
+}
+
+sync_default_theme() {
+  if [ -n "${WP_DEFAULT_THEME:-}" ]; then
+    echo "==> Activating default theme: ${WP_DEFAULT_THEME} ..."
+    $DC exec -T wordpress wp --allow-root theme activate "$WP_DEFAULT_THEME" \
+      || echo "    Warning: could not activate theme '${WP_DEFAULT_THEME}' (check the slug matches the theme folder name)."
+  else
+    echo "==> Skipping theme activation (WP_DEFAULT_THEME is not set)."
+  fi
+}
+
+run_sync() {
+  sync_wp_config
+  sync_plugins
+  sync_mu_plugins
+  sync_themes
+  sync_default_theme
+}
+
 show_usage() {
   cat <<'EOF'
 Usage:
   ./wp.sh                  Build/start and configure WordPress
   ./wp.sh down             Stop containers (keep volumes)
   ./wp.sh reset            Stop containers and delete volumes
-  ./wp.sh exec [cmd ...]   Run a command in the WordPress container
+  ./wp.sh exec <cmd ...>   Run a command in the WordPress container
   ./wp.sh wp [args ...]    Run WP-CLI (wp --allow-root) in the container
   ./wp.sh shell            Open an interactive shell in the container
-  ./wp.sh terminal         Connect to the container terminal (alias for shell)
+  ./wp.sh sync             Re-apply plugins, mu-plugins, themes, and wp-config
   ./wp.sh help             Show this help
 
 Examples:
+  ./wp.sh sync
+  ./wp.sh shell
   ./wp.sh wp plugin list
-  ./wp.sh wp option get siteurl
   ./wp.sh exec ls -la /var/www/html/wp-content/plugins
-  ./wp.sh terminal
 EOF
 }
 
@@ -156,7 +365,7 @@ container_exec() {
   fi
 }
 
-open_terminal() {
+open_shell() {
   require_container
   $DC exec wordpress bash
 }
@@ -181,10 +390,11 @@ fi
 if [ "${1:-}" = "exec" ]; then
   shift
   if [ $# -eq 0 ]; then
-    open_terminal
-  else
-    container_exec "$@"
+    echo "Usage: ./wp.sh exec <command...>" >&2
+    echo "For an interactive shell, use: ./wp.sh shell" >&2
+    exit 1
   fi
+  container_exec "$@"
   exit 0
 fi
 
@@ -199,37 +409,26 @@ if [ "${1:-}" = "wp" ]; then
   exit 0
 fi
 
-if [ "${1:-}" = "shell" ] || [ "${1:-}" = "bash" ] || [ "${1:-}" = "terminal" ]; then
-  open_terminal
+if [ "${1:-}" = "shell" ]; then
+  open_shell
+  exit 0
+fi
+
+if [ "${1:-}" = "sync" ]; then
+  echo "==> Ensuring containers are running..."
+  $DC up -d
+  wait_for_database
+  wait_for_wordpress
+  run_sync
+  echo "==> Sync complete."
   exit 0
 fi
 
 echo "==> Building and starting containers..."
 $DC up -d --build
 
-echo "==> Waiting for the database to become healthy..."
-attempts=0
-until [ "$(docker inspect -f '{{.State.Health.Status}}' "$($DC ps -q db)" 2>/dev/null)" = "healthy" ]; do
-  attempts=$((attempts + 1))
-  if [ "$attempts" -gt 60 ]; then
-    echo "Database did not become healthy in time." >&2
-    $DC logs db
-    exit 1
-  fi
-  sleep 2
-done
-
-echo "==> Waiting for the WordPress container to respond..."
-attempts=0
-until $DC exec -T wordpress wp --allow-root cli info >/dev/null 2>&1; do
-  attempts=$((attempts + 1))
-  if [ "$attempts" -gt 60 ]; then
-    echo "WordPress container did not become ready in time." >&2
-    $DC logs wordpress
-    exit 1
-  fi
-  sleep 2
-done
+wait_for_database
+wait_for_wordpress
 
 echo "==> Checking WordPress core installation..."
 if ! $DC exec -T wordpress wp --allow-root core is-installed >/dev/null 2>&1; then
@@ -254,164 +453,7 @@ echo "==> Setting pretty permalinks..."
 $DC exec -T wordpress wp --allow-root rewrite structure '/%postname%/'
 $DC exec -T wordpress wp --allow-root rewrite flush --hard
 
-sync_wp_config
-
-echo "==> Installing/activating plugins from plugins/ ..."
-PLUGIN_ZIPS_DIR=/var/plugin-zips
-PLUGIN_INSTALL_DIR=/var/www/html/wp-content/plugins
-
-shopt -s nullglob
-plugin_entries=(plugins/*)
-shopt -u nullglob
-if [ ${#plugin_entries[@]} -eq 0 ]; then
-  echo "    None found (plugins/ is empty)."
-else
-  for entry in "${plugin_entries[@]}"; do
-    name="$(basename "$entry")"
-
-    # Skip placeholder / hidden entries (e.g. .gitkeep).
-    if [[ "$name" == .* ]]; then
-      continue
-    fi
-
-    if [ -f "$entry" ] && [[ "$name" == *.zip ]]; then
-      echo "    Installing $name from archive (extract inside container)..."
-      $DC exec -T wordpress wp --allow-root plugin install "$PLUGIN_ZIPS_DIR/$name" --activate --force \
-        || echo "    Warning: could not install '$name' (is it a valid WordPress plugin zip?)."
-      continue
-    fi
-
-    if [ -f "$entry" ] && [[ "$name" == *.php ]]; then
-      echo "    Copying single-file plugin $name into the container..."
-      $DC cp "$entry" "wordpress:$PLUGIN_INSTALL_DIR/$name"
-      echo "    Activating $name..."
-      $DC exec -T wordpress wp --allow-root plugin activate "$name" \
-        || echo "    Warning: could not activate '$name'."
-      continue
-    fi
-
-    if [ -d "$entry" ]; then
-      slug="$name"
-      echo "    Copying plugin folder $slug into the container..."
-      $DC cp "$entry" "wordpress:$PLUGIN_INSTALL_DIR/$slug"
-
-      if [ -f "$entry/composer.json" ] && [ ! -d "$entry/vendor" ]; then
-        echo "    Installing composer dependencies for $slug..."
-        $DC exec -T -e COMPOSER_ALLOW_SUPERUSER=1 wordpress \
-          composer install --no-interaction --no-dev --working-dir="$PLUGIN_INSTALL_DIR/$slug" \
-          || echo "    Warning: composer install failed for $slug, continuing anyway."
-      fi
-
-      echo "    Activating $slug..."
-      $DC exec -T wordpress wp --allow-root plugin activate "$slug" \
-        || echo "    Warning: could not activate '$slug' (check it's a valid plugin folder with a main plugin header)."
-      continue
-    fi
-
-    echo "    Warning: skipping unrecognized entry '$name' (expected .zip, .php, or a plugin folder)."
-  done
-fi
-
-echo "==> Installing must-use plugins from mu-plugins/ ..."
-MU_PLUGIN_ZIPS_DIR=/var/mu-plugin-zips
-MU_PLUGIN_INSTALL_DIR=/var/www/html/wp-content/mu-plugins
-
-shopt -s nullglob
-mu_plugin_entries=(mu-plugins/*)
-shopt -u nullglob
-if [ ${#mu_plugin_entries[@]} -eq 0 ]; then
-  echo "    None found (mu-plugins/ is empty)."
-else
-  for entry in "${mu_plugin_entries[@]}"; do
-    name="$(basename "$entry")"
-
-    if [[ "$name" == .* ]]; then
-      continue
-    fi
-
-    if [ -f "$entry" ] && [[ "$name" == *.zip ]]; then
-      echo "    Extracting $name into mu-plugins (inside container)..."
-      $DC exec -T wordpress bash -lc \
-        "mkdir -p '$MU_PLUGIN_INSTALL_DIR' && unzip -oq '$MU_PLUGIN_ZIPS_DIR/$name' -d '$MU_PLUGIN_INSTALL_DIR'" \
-        || echo "    Warning: could not extract '$name' (is it a valid zip archive?)."
-      continue
-    fi
-
-    if [ -f "$entry" ] && [[ "$name" == *.php ]]; then
-      echo "    Copying must-use plugin $name into the container..."
-      $DC exec -T wordpress mkdir -p "$MU_PLUGIN_INSTALL_DIR"
-      $DC cp "$entry" "wordpress:$MU_PLUGIN_INSTALL_DIR/$name"
-      continue
-    fi
-
-    if [ -d "$entry" ]; then
-      slug="$name"
-      echo "    Copying must-use plugin folder $slug into the container..."
-      $DC exec -T wordpress mkdir -p "$MU_PLUGIN_INSTALL_DIR"
-      $DC cp "$entry" "wordpress:$MU_PLUGIN_INSTALL_DIR/$slug"
-
-      if [ -f "$entry/composer.json" ] && [ ! -d "$entry/vendor" ]; then
-        echo "    Installing composer dependencies for $slug..."
-        $DC exec -T -e COMPOSER_ALLOW_SUPERUSER=1 wordpress \
-          composer install --no-interaction --no-dev --working-dir="$MU_PLUGIN_INSTALL_DIR/$slug" \
-          || echo "    Warning: composer install failed for $slug, continuing anyway."
-      fi
-      continue
-    fi
-
-    echo "    Warning: skipping unrecognized entry '$name' (expected .zip, .php, or a plugin folder)."
-  done
-fi
-
-echo "==> Installing themes from themes/ ..."
-THEME_ZIPS_DIR=/var/theme-zips
-THEME_INSTALL_DIR=/var/www/html/wp-content/themes
-
-shopt -s nullglob
-theme_entries=(themes/*)
-shopt -u nullglob
-if [ ${#theme_entries[@]} -eq 0 ]; then
-  echo "    None found (themes/ is empty)."
-else
-  for entry in "${theme_entries[@]}"; do
-    name="$(basename "$entry")"
-
-    if [[ "$name" == .* ]]; then
-      continue
-    fi
-
-    if [ -f "$entry" ] && [[ "$name" == *.zip ]]; then
-      echo "    Installing $name from archive (extract inside container)..."
-      $DC exec -T wordpress wp --allow-root theme install "$THEME_ZIPS_DIR/$name" --force \
-        || echo "    Warning: could not install '$name' (is it a valid WordPress theme zip?)."
-      continue
-    fi
-
-    if [ -d "$entry" ]; then
-      slug="$name"
-      echo "    Copying theme folder $slug into the container..."
-      $DC cp "$entry" "wordpress:$THEME_INSTALL_DIR/$slug"
-
-      if [ -f "$entry/composer.json" ] && [ ! -d "$entry/vendor" ]; then
-        echo "    Installing composer dependencies for $slug..."
-        $DC exec -T -e COMPOSER_ALLOW_SUPERUSER=1 wordpress \
-          composer install --no-interaction --no-dev --working-dir="$THEME_INSTALL_DIR/$slug" \
-          || echo "    Warning: composer install failed for $slug, continuing anyway."
-      fi
-      continue
-    fi
-
-    echo "    Warning: skipping unrecognized entry '$name' (expected .zip or a theme folder)."
-  done
-fi
-
-if [ -n "${WP_DEFAULT_THEME:-}" ]; then
-  echo "==> Activating default theme: ${WP_DEFAULT_THEME} ..."
-  $DC exec -T wordpress wp --allow-root theme activate "$WP_DEFAULT_THEME" \
-    || echo "    Warning: could not activate theme '${WP_DEFAULT_THEME}' (check the slug matches the theme folder name)."
-else
-  echo "==> Skipping theme activation (WP_DEFAULT_THEME is not set)."
-fi
+run_sync
 
 cat <<EOF
 
@@ -428,8 +470,8 @@ $(if [ -n "${WP_SITE_URL:-}" ] && [[ "$WP_SITE_URL_RESOLVED" != *"localhost"* ]]
   echo "                127.0.0.1  $(echo "$WP_SITE_URL_RESOLVED" | sed -E 's#^[a-zA-Z]+://([^/:]+).*#\1#')"
 fi)
 
-   Themes:            drop .zip archives or theme folders into themes/ and re-run
-                       this script. Zips are installed inside the container only.
+   Themes:            drop .zip archives or theme folders into themes/ and run
+                       ./wp.sh sync (or ./wp.sh) to apply changes.
                        Set WP_DEFAULT_THEME in .env to the theme slug (folder name)
                        to activate one; leave blank to keep the current theme.
 
@@ -437,21 +479,20 @@ fi)
                        They are copied/extracted into wp-content/mu-plugins/ inside
                        the container and load automatically (no activation step).
 
-   Plugins:           drop .zip archives into plugins/ and re-run this script.
-                       Zips are installed inside the container only — nothing is
-                       extracted on the host. Folders and single .php files are
-                       copied into the container before activation.
+   Plugins:           drop .zip archives into plugins/ and run ./wp.sh sync (or
+                       ./wp.sh) to apply. Zips are installed inside the container
+                       only — nothing is extracted on the host.
 
    wp-config:         set common constants in .env (WP_DEBUG, WP_MEMORY_LIMIT,
-                       etc.) and re-run this script. For advanced PHP overrides,
+                       etc.) and run ./wp.sh sync. For advanced PHP overrides,
                        edit config/wp-config.extra.php or add snippets under
                        config/wp-config.d/.
 
    Useful commands (run from this docker/ directory):
+     ./wp.sh sync    # re-apply plugins, mu-plugins, themes, and wp-config
+     ./wp.sh shell   # interactive shell in the container
      ./wp.sh wp plugin list
-     ./wp.sh wp cron event run --due-now
      ./wp.sh exec ls -la /var/www/html/wp-content/plugins
-     ./wp.sh terminal
      $DC logs -f wordpress
      ./wp.sh down    # stop containers, keep data
      ./wp.sh reset   # stop containers and wipe all data
