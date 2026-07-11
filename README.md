@@ -24,7 +24,7 @@ Built for plugin and theme testing — no local PHP, MySQL, or Apache installati
 ## Quick start
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/Netlogpro/wp-docker.git
 cd docker
 
 # First run creates .env and config/wp-config.extra.php from templates
