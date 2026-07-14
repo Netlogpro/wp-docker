@@ -140,7 +140,11 @@ wait_for_database() {
 wait_for_wordpress() {
   echo "==> Waiting for the WordPress container to respond..."
   local attempts=0
-  until $DC exec -T wordpress wp --allow-root cli info >/dev/null 2>&1; do
+  # WP-CLI is available as soon as the container starts, but on a fresh volume the
+  # official image entrypoint still needs time to copy core files and generate
+  # wp-config.php from WORDPRESS_* env vars. Wait for both before core install.
+  until $DC exec -T wordpress wp --allow-root cli info >/dev/null 2>&1 \
+    && $DC exec -T wordpress test -f /var/www/html/wp-config.php; do
     attempts=$((attempts + 1))
     if [ "$attempts" -gt 60 ]; then
       echo "WordPress container did not become ready in time." >&2
