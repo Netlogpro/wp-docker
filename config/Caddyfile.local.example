@@ -1,0 +1,15 @@
+# Reference only — wp.sh generates config/Caddyfile for ./wp.sh local-ssl.
+# Re-run ./wp.sh local-ssl to (re)generate the real file.
+#
+# TLS is terminated entirely inside the Caddy container using its own local CA
+# (no host tooling). The browser shows it as untrusted until you trust that CA.
+
+{
+	local_certs
+}
+
+{$SITE_HOST} {
+	tls internal
+	encode gzip
+	reverse_proxy wordpress:80
+}

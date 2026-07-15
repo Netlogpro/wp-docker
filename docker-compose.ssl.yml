@@ -1,0 +1,28 @@
+# SSL override — used when starting with ./wp.sh local-ssl or ./wp.sh global-ssl.
+# Merged on top of docker-compose.yml via COMPOSE_FILE (set by wp.sh).
+#
+# - Stops publishing WordPress directly on the host
+# - Adds Caddy as the HTTPS reverse proxy on HTTP_PORT / HTTPS_PORT
+
+services:
+  wordpress:
+    ports: !override []
+    expose:
+      - "80"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - wordpress
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - ./config/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

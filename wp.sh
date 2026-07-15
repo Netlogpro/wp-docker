@@ -10,6 +10,9 @@
 #
 # Usage:
 #   ./wp.sh                  # build/start everything and configure WordPress
+#   ./wp.sh local-ssl        # start with HTTPS via Caddy local CA (dev)
+#   ./wp.sh global-ssl       # start with HTTPS via Let's Encrypt (public DNS)
+#   ./wp.sh trust-ssl        # re-export/trust the Caddy local CA on this machine
 #   ./wp.sh down             # stop and remove containers (keeps volumes)
 #   ./wp.sh reset            # stop and remove containers AND volumes (full wipe)
 #   ./wp.sh exec <cmd ...>   # run a command in the WordPress container
@@ -19,6 +22,9 @@
 #   ./wp.sh phpmyadmin       # same as ./wp.sh, plus start phpMyAdmin
 #   ./wp.sh logs             # follow WordPress container logs
 #   ./wp.sh help             # show usage
+#
+# local-ssl and global-ssl are mutually exclusive. They may be combined with
+# phpmyadmin, e.g. ./wp.sh phpmyadmin local-ssl
 #
 set -euo pipefail
 
@@ -72,6 +78,325 @@ if [ -n "${WP_SITE_URL:-}" ]; then
 else
   WP_SITE_URL_RESOLVED="http://localhost:${WORDPRESS_PORT}"
 fi
+
+# ============================================================================
+# SSL support (additive) — everything above stays the original, unchanged flow.
+#   local-ssl  → Caddy reverse proxy with a local CA (dev / .local domains)
+#   global-ssl → Caddy reverse proxy with Let's Encrypt (public DNS)
+# The two are mutually exclusive and only take effect when starting the stack.
+# ============================================================================
+HTTP_PORT="${HTTP_PORT:-80}"
+HTTPS_PORT="${HTTPS_PORT:-443}"
+SSL_MODE_FILE=".ssl-mode"
+SITE_HOST=""
+
+# Pull local-ssl / global-ssl out of the argument list (position-independent).
+SSL_MODE_ARG=""
+SSL_PARSED_ARGS=()
+for arg in "$@"; do
+  case "$arg" in
+    local-ssl)
+      if [ -n "$SSL_MODE_ARG" ]; then
+        echo "Error: local-ssl and global-ssl cannot be used together. Pick one." >&2
+        exit 1
+      fi
+      SSL_MODE_ARG=local
+      ;;
+    global-ssl)
+      if [ -n "$SSL_MODE_ARG" ]; then
+        echo "Error: local-ssl and global-ssl cannot be used together. Pick one." >&2
+        exit 1
+      fi
+      SSL_MODE_ARG=global
+      ;;
+    *)
+      SSL_PARSED_ARGS+=("$arg")
+      ;;
+  esac
+done
+if [ ${#SSL_PARSED_ARGS[@]} -gt 0 ]; then
+  set -- "${SSL_PARSED_ARGS[@]}"
+else
+  set --
+fi
+
+# Effective SSL mode:
+#   - starting the stack (no subcommand, or "phpmyadmin"): the CLI flag decides
+#   - other subcommands (down/logs/sync/...): reuse the last started mode so the
+#     unchanged `$DC` commands keep managing the Caddy proxy too
+case "${1:-}" in
+  ""|phpmyadmin)
+    SSL_MODE="$SSL_MODE_ARG"
+    ;;
+  *)
+    if [ -f "$SSL_MODE_FILE" ]; then
+      SSL_MODE="$(tr -d '[:space:]' < "$SSL_MODE_FILE")"
+    else
+      SSL_MODE=""
+    fi
+    ;;
+esac
+
+# When SSL is active, layer the Caddy compose file over the base one so every
+# existing `$DC ...` invocation transparently includes the proxy — no changes
+# to the individual subcommand handlers required.
+if [ -n "$SSL_MODE" ]; then
+  export COMPOSE_FILE="docker-compose.yml:docker-compose.ssl.yml"
+fi
+
+# Host portion of WP_SITE_URL (no scheme/port/path). Used for the Caddyfile.
+extract_site_host() {
+  local url="${1#*://}"
+  url="${url%%/*}"
+  url="${url%%:*}"
+  printf '%s' "$url"
+}
+
+# Force https:// (and HTTPS_PORT) for the resolved site URL when SSL is on.
+resolve_ssl_site_url() {
+  SITE_HOST="$(extract_site_host "$WP_SITE_URL")"
+  if [ "$HTTPS_PORT" = "443" ]; then
+    WP_SITE_URL_RESOLVED="https://${SITE_HOST}"
+  else
+    WP_SITE_URL_RESOLVED="https://${SITE_HOST}:${HTTPS_PORT}"
+  fi
+}
+
+validate_ssl_mode() {
+  [ -z "$SSL_MODE" ] && return 0
+
+  if [ -z "${WP_SITE_URL:-}" ]; then
+    echo "Error: SSL requires WP_SITE_URL in .env (e.g. newsite.local or example.com)." >&2
+    exit 1
+  fi
+
+  local host
+  host="$(extract_site_host "$WP_SITE_URL")"
+  if [ -z "$host" ] || [ "$host" = "localhost" ]; then
+    echo "Error: SSL requires a hostname in WP_SITE_URL (not bare localhost)." >&2
+    echo "Example: WP_SITE_URL=newsite.local   or   WP_SITE_URL=example.com" >&2
+    exit 1
+  fi
+
+  if [ "$HTTP_PORT" = "$HTTPS_PORT" ]; then
+    echo "Error: HTTP_PORT (${HTTP_PORT}) and HTTPS_PORT (${HTTPS_PORT}) must differ." >&2
+    exit 1
+  fi
+
+  if [ "$SSL_MODE" = "global" ]; then
+    if [ -z "${WP_ADMIN_EMAIL:-}" ] || [ "$WP_ADMIN_EMAIL" = "admin@example.com" ]; then
+      echo "Error: global-ssl requires a real WP_ADMIN_EMAIL in .env (used for Let's Encrypt)." >&2
+      echo "The default 'admin@example.com' is not accepted by Let's Encrypt." >&2
+      exit 1
+    fi
+    case "$host" in
+      *.local|*.test|*.localhost)
+        echo "Error: global-ssl needs a public DNS hostname (not .local / .test)." >&2
+        echo "For local HTTPS, use: ./wp.sh local-ssl" >&2
+        exit 1
+        ;;
+    esac
+  fi
+}
+
+write_caddyfile() {
+  mkdir -p config
+  if [ "$SSL_MODE" = "local" ]; then
+    cat > config/Caddyfile <<EOF
+# Generated by wp.sh (local-ssl). Do not edit by hand.
+# TLS is terminated entirely inside the Caddy container using its own local CA.
+
+{
+	local_certs
+}
+
+${SITE_HOST} {
+	tls internal
+	encode gzip
+	reverse_proxy wordpress:80
+}
+EOF
+  elif [ "$SSL_MODE" = "global" ]; then
+    cat > config/Caddyfile <<EOF
+# Generated by wp.sh (global-ssl). Do not edit by hand.
+
+{
+	email ${WP_ADMIN_EMAIL}
+}
+
+${SITE_HOST} {
+	encode gzip
+	reverse_proxy wordpress:80
+}
+EOF
+  fi
+}
+
+# After Caddy is up: copy its in-container local CA onto the host so the
+# browser can be taught to trust it (TLS still terminates only in Caddy).
+CADDY_ROOT_CA_FILE="caddy-root.crt"
+CADDY_ROOT_CA_CER="caddy-root.cer"
+LOCAL_SSL_TRUST_STATUS=""
+
+is_wsl() {
+  grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null
+}
+
+export_caddy_local_ca() {
+  local attempts=0
+  local container_ca="/data/caddy/pki/authorities/local/root.crt"
+
+  echo "==> Exporting Caddy local CA from the container..."
+  until $DC exec -T caddy test -f "$container_ca" >/dev/null 2>&1; do
+    attempts=$((attempts + 1))
+    if [ "$attempts" -gt 30 ]; then
+      echo "    Warning: Caddy local CA not ready yet; skipping host trust step." >&2
+      return 1
+    fi
+    # Touch HTTPS once so Caddy materializes the local PKI if needed.
+    curl -sk --resolve "${SITE_HOST}:443:127.0.0.1" "https://${SITE_HOST}/" >/dev/null 2>&1 || true
+    sleep 1
+  done
+
+  $DC cp "caddy:${container_ca}" "$CADDY_ROOT_CA_FILE"
+  if command -v openssl >/dev/null 2>&1; then
+    openssl x509 -in "$CADDY_ROOT_CA_FILE" -outform DER -out "$CADDY_ROOT_CA_CER" 2>/dev/null \
+      || cp "$CADDY_ROOT_CA_FILE" "$CADDY_ROOT_CA_CER"
+  else
+    cp "$CADDY_ROOT_CA_FILE" "$CADDY_ROOT_CA_CER"
+  fi
+  echo "    Saved ${CADDY_ROOT_CA_FILE} (and ${CADDY_ROOT_CA_CER})."
+}
+
+windows_ca_already_trusted() {
+  powershell.exe -NoProfile -Command \
+    "if (Get-ChildItem Cert:\\CurrentUser\\Root -ErrorAction SilentlyContinue | Where-Object { \$_.Subject -like '*Caddy Local Authority*' }) { exit 0 } else { exit 1 }" \
+    >/dev/null 2>&1
+}
+
+trust_caddy_local_ca_windows() {
+  local win_path
+  local desk_win
+  local desk_wsl
+
+  if windows_ca_already_trusted; then
+    echo "    Windows already trusts the Caddy Local Authority CA."
+    LOCAL_SSL_TRUST_STATUS="trusted"
+    return 0
+  fi
+
+  # Prefer a native Windows path (Desktop) — WSL UNC paths break certutil.
+  desk_win="$(powershell.exe -NoProfile -Command '[Environment]::GetFolderPath("Desktop")' 2>/dev/null | tr -d '\r')"
+  if [ -n "$desk_win" ]; then
+    desk_wsl="$(wslpath "$desk_win" 2>/dev/null || true)"
+  fi
+  if [ -n "$desk_wsl" ] && [ -d "$desk_wsl" ]; then
+    cp -f "$CADDY_ROOT_CA_CER" "$desk_wsl/caddy-root.cer"
+    win_path="${desk_win}\\caddy-root.cer"
+  else
+    win_path="$(wslpath -w "$(pwd)/${CADDY_ROOT_CA_CER}" 2>/dev/null | tr -d '\r')"
+  fi
+
+  echo "    Importing Caddy CA into Windows Current User Trusted Root store..."
+  echo "    If a Security Warning dialog appears, click Yes."
+  if powershell.exe -NoProfile -Command "certutil -user -addstore Root '$win_path'" >/tmp/wp-ssl-trust.out 2>&1; then
+    if windows_ca_already_trusted; then
+      echo "    Windows trust store updated."
+      LOCAL_SSL_TRUST_STATUS="trusted"
+      return 0
+    fi
+  fi
+
+  # Fallback: Import-Certificate (also may prompt)
+  if powershell.exe -NoProfile -Command \
+      "Import-Certificate -FilePath '$win_path' -CertStoreLocation Cert:\\CurrentUser\\Root | Out-Null" \
+      >/tmp/wp-ssl-trust.out 2>&1 \
+      && windows_ca_already_trusted; then
+    echo "    Windows trust store updated."
+    LOCAL_SSL_TRUST_STATUS="trusted"
+    return 0
+  fi
+
+  echo "    Warning: could not auto-import the CA (dialog cancelled or blocked)." >&2
+  echo "    Manual: double-click ${win_path} → Install Certificate → Current User" >&2
+  echo "            → Trusted Root Certification Authorities → Finish → Yes." >&2
+  LOCAL_SSL_TRUST_STATUS="manual"
+  return 1
+}
+
+trust_caddy_local_ca_macos() {
+  if security find-certificate -c "Caddy Local Authority" >/dev/null 2>&1; then
+    echo "    macOS already trusts the Caddy Local Authority CA."
+    LOCAL_SSL_TRUST_STATUS="trusted"
+    return 0
+  fi
+  echo "    Adding Caddy CA to the login keychain (may prompt for your password)..."
+  if security add-trusted-cert -r trustRoot -k "$HOME/Library/Keychains/login.keychain-db" \
+       "$CADDY_ROOT_CA_FILE" 2>/tmp/wp-ssl-trust.out; then
+    LOCAL_SSL_TRUST_STATUS="trusted"
+    echo "    macOS trust store updated."
+    return 0
+  fi
+  LOCAL_SSL_TRUST_STATUS="manual"
+  echo "    Warning: could not trust the CA automatically. Import ${CADDY_ROOT_CA_FILE} via Keychain Access." >&2
+  return 1
+}
+
+trust_caddy_local_ca_linux() {
+  local dest="/usr/local/share/ca-certificates/caddy-local-authority.crt"
+  if [ -f "$dest" ]; then
+    echo "    Linux system CA already has a Caddy entry at ${dest}."
+    LOCAL_SSL_TRUST_STATUS="trusted"
+    return 0
+  fi
+  if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+    echo "    Installing Caddy CA into the system trust store..."
+    sudo cp "$CADDY_ROOT_CA_FILE" "$dest"
+    if sudo update-ca-certificates >/tmp/wp-ssl-trust.out 2>&1; then
+      LOCAL_SSL_TRUST_STATUS="trusted"
+      echo "    Linux trust store updated."
+      return 0
+    fi
+  fi
+  LOCAL_SSL_TRUST_STATUS="manual"
+  echo "    Warning: need sudo to install into the system CA store." >&2
+  echo "    Run:  sudo cp ${CADDY_ROOT_CA_FILE} ${dest} && sudo update-ca-certificates" >&2
+  return 1
+}
+
+ensure_windows_hosts_entry() {
+  local host="$1"
+  local ps
+
+  [ -z "$host" ] && return 0
+  is_wsl || return 0
+
+  ps="\$hosts='C:\\Windows\\System32\\drivers\\etc\\hosts'; \$line='127.0.0.1  ${host}'; if (Select-String -Path \$hosts -Pattern ([regex]::Escape('${host}')) -Quiet) { exit 0 }; try { Add-Content -Path \$hosts -Value \$line -ErrorAction Stop; exit 0 } catch { exit 1 }"
+  if powershell.exe -NoProfile -Command "$ps" >/dev/null 2>&1; then
+    echo "    Windows hosts already contains (or was updated with) ${host}."
+    return 0
+  fi
+  echo "    Note: could not write Windows hosts (needs Admin). Ensure this line exists:" >&2
+  echo "      127.0.0.1  ${host}" >&2
+  echo "    File: C:\\Windows\\System32\\drivers\\etc\\hosts" >&2
+  return 1
+}
+
+# Export Caddy's CA and teach the host browser OS to trust it.
+trust_local_ssl_on_host() {
+  LOCAL_SSL_TRUST_STATUS="skipped"
+  export_caddy_local_ca || return 1
+
+  echo "==> Trusting Caddy local CA on this machine (so the browser shows Secure)..."
+  if is_wsl && command -v powershell.exe >/dev/null 2>&1; then
+    ensure_windows_hosts_entry "$SITE_HOST" || true
+    trust_caddy_local_ca_windows || true
+  elif [ "$(uname -s)" = "Darwin" ]; then
+    trust_caddy_local_ca_macos || true
+  else
+    trust_caddy_local_ca_linux || true
+  fi
+}
 
 set_wp_config_from_env() {
   local env_var="$1"
@@ -353,6 +678,9 @@ show_usage() {
   cat <<'EOF'
 Usage:
   ./wp.sh                  Build/start and configure WordPress
+  ./wp.sh local-ssl        Start with HTTPS (Caddy local CA — for .local domains)
+  ./wp.sh global-ssl       Start with HTTPS (Let's Encrypt — public DNS required)
+  ./wp.sh trust-ssl        Re-export/trust the Caddy local CA on this machine
   ./wp.sh down             Stop containers (keep volumes)
   ./wp.sh reset            Stop containers and delete volumes
   ./wp.sh exec <cmd ...>   Run a command in the WordPress container
@@ -363,10 +691,20 @@ Usage:
   ./wp.sh logs             Follow WordPress container logs
   ./wp.sh help             Show this help
 
+SSL notes:
+  local-ssl and global-ssl are mutually exclusive.
+  Combine with phpMyAdmin:  ./wp.sh phpmyadmin local-ssl
+  SSL requires WP_SITE_URL in .env. global-ssl also needs a real WP_ADMIN_EMAIL.
+  local-ssl exports Caddy's CA and trusts it on the host (WSL→Windows / macOS / Linux)
+  so the browser can show a Secure padlock. Without an SSL flag, previous SSL is cleared.
+
 Examples:
   ./wp.sh sync
   ./wp.sh shell
-  ./wp.sh phpmyadmin
+  ./wp.sh local-ssl
+  ./wp.sh trust-ssl
+  ./wp.sh global-ssl
+  ./wp.sh phpmyadmin local-ssl
   ./wp.sh logs
   ./wp.sh wp plugin list
   ./wp.sh exec ls -la /var/www/html/wp-content/plugins
@@ -453,9 +791,46 @@ if [ "${1:-}" = "sync" ]; then
   exit 0
 fi
 
+if [ "${1:-}" = "trust-ssl" ]; then
+  if [ -n "$SSL_MODE_ARG" ]; then
+    echo "Error: trust-ssl does not take local-ssl/global-ssl flags." >&2
+    exit 1
+  fi
+  if [ "${SSL_MODE:-}" != "local" ]; then
+    echo "Error: no local-ssl stack is active. Start with: ./wp.sh local-ssl" >&2
+    exit 1
+  fi
+  if [ -z "${SITE_HOST:-}" ]; then
+    if [ -n "${WP_SITE_URL:-}" ]; then
+      SITE_HOST="$(extract_site_host "$WP_SITE_URL")"
+    else
+      echo "Error: WP_SITE_URL is required for trust-ssl." >&2
+      exit 1
+    fi
+  fi
+  if ! $DC ps --status running --services 2>/dev/null | grep -qx caddy; then
+    echo "Error: Caddy is not running. Start with: ./wp.sh local-ssl" >&2
+    exit 1
+  fi
+  trust_local_ssl_on_host
+  exit 0
+fi
+
 WITH_PHPMYADMIN=false
 if [ "${1:-}" = "phpmyadmin" ]; then
   WITH_PHPMYADMIN=true
+fi
+
+# Prepare SSL (additive): validate, generate the Caddyfile, force the https URL,
+# and persist the mode so later subcommands keep managing the proxy.
+if [ -n "$SSL_MODE" ]; then
+  validate_ssl_mode
+  resolve_ssl_site_url
+  write_caddyfile
+  printf '%s\n' "$SSL_MODE" > "$SSL_MODE_FILE"
+  echo "==> SSL mode: ${SSL_MODE} (https via Caddy → ${SITE_HOST})"
+else
+  rm -f "$SSL_MODE_FILE" config/Caddyfile
 fi
 
 if [ "$WITH_PHPMYADMIN" = true ]; then
@@ -467,14 +842,35 @@ if [ "$WITH_PHPMYADMIN" = true ]; then
 fi
 
 echo "==> Building and starting containers..."
-if [ "$WITH_PHPMYADMIN" = true ]; then
+if [ "$WITH_PHPMYADMIN" = true ] && [ -n "$SSL_MODE" ]; then
+  $DC up -d --build --remove-orphans db wordpress caddy phpmyadmin
+elif [ "$WITH_PHPMYADMIN" = true ]; then
   $DC up -d --build db wordpress phpmyadmin
+elif [ -n "$SSL_MODE" ]; then
+  $DC up -d --build --remove-orphans db wordpress caddy
 else
   $DC up -d --build db wordpress
 fi
 
 wait_for_database
 wait_for_wordpress
+
+if [ -n "$SSL_MODE" ]; then
+  echo "==> Waiting for Caddy..."
+  ssl_attempts=0
+  until $DC exec -T caddy caddy version >/dev/null 2>&1; do
+    ssl_attempts=$((ssl_attempts + 1))
+    if [ "$ssl_attempts" -gt 30 ]; then
+      echo "Caddy did not become ready in time." >&2
+      $DC logs caddy
+      exit 1
+    fi
+    sleep 1
+  done
+  if [ "$SSL_MODE" = "local" ]; then
+    trust_local_ssl_on_host || true
+  fi
+fi
 
 echo "==> Checking WordPress core installation..."
 if ! $DC exec -T wordpress wp --allow-root core is-installed >/dev/null 2>&1; then
@@ -506,6 +902,20 @@ cat <<EOF
 ================================================================
  WordPress test environment is ready!
 $(if [ "$WITH_PHPMYADMIN" = true ]; then echo ""; echo "   phpMyAdmin:  http://localhost:${PHPMYADMIN_PORT}/"; fi)
+$(if [ -n "$SSL_MODE" ]; then
+  echo ""
+  echo "   SSL:       ${SSL_MODE} (Caddy reverse proxy)"
+  if [ "$SSL_MODE" = "global" ]; then
+    echo "   Cert:      Let's Encrypt (${WP_ADMIN_EMAIL})"
+  else
+    echo "   Cert:      Caddy internal CA (in-container)"
+    case "${LOCAL_SSL_TRUST_STATUS:-}" in
+      trusted) echo "   Trust:     host trust store updated — restart the browser, then open the site" ;;
+      manual)  echo "   Trust:     auto-import needs confirmation — see messages above / run ./wp.sh trust-ssl" ;;
+      *)       echo "   Trust:     run ./wp.sh trust-ssl if the browser still shows Not secure" ;;
+    esac
+  fi
+fi)
 
    Site:      ${WP_SITE_URL_RESOLVED}/
    wp-admin:  ${WP_SITE_URL_RESOLVED}/wp-admin/
@@ -526,6 +936,18 @@ $(if [ -n "${WP_SITE_URL:-}" ] && [[ "$WP_SITE_URL_RESOLVED" != *"localhost"* ]]
   echo ""
   echo "   Hosts file:  map the domain on your machine, e.g."
   echo "                127.0.0.1  $(echo "$WP_SITE_URL_RESOLVED" | sed -E 's#^[a-zA-Z]+://([^/:]+).*#\1#')"
+fi)
+$(if [ "$SSL_MODE" = "local" ]; then
+  echo ""
+  echo "   TLS terminates in the Caddy container. ./wp.sh local-ssl also exports"
+  echo "   the CA and trusts it on this machine (Windows via WSL / macOS / Linux)."
+  echo "   Fully quit and reopen the browser after a successful trust step."
+  echo "   Re-run trust only:  ./wp.sh trust-ssl"
+fi)
+$(if [ "$SSL_MODE" = "global" ]; then
+  echo ""
+  echo "   Let's Encrypt: DNS for ${SITE_HOST} must point here, and"
+  echo "   ports ${HTTP_PORT}/tcp and ${HTTPS_PORT}/tcp must be reachable."
 fi)
 
    Themes:            drop .zip archives or theme folders into themes/ and run
@@ -549,6 +971,8 @@ fi)
    Useful commands (run from this docker/ directory):
      ./wp.sh sync        # re-apply plugins, mu-plugins, themes, wp-config, uploads perms
      ./wp.sh shell       # interactive shell in the container
+     ./wp.sh local-ssl   # start with local HTTPS
+     ./wp.sh global-ssl  # start with Let's Encrypt HTTPS
      ./wp.sh phpmyadmin  # full setup plus phpMyAdmin
      ./wp.sh wp plugin list
      ./wp.sh exec ls -la /var/www/html/wp-content/plugins
