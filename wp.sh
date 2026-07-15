@@ -15,7 +15,7 @@
 #   ./wp.sh exec <cmd ...>   # run a command in the WordPress container
 #   ./wp.sh wp [args ...]    # run WP-CLI (wp --allow-root) in the container
 #   ./wp.sh shell            # open an interactive shell in the container
-#   ./wp.sh sync             # re-apply plugins, mu-plugins, themes, and wp-config
+#   ./wp.sh sync             # re-apply plugins, mu-plugins, themes, wp-config, uploads perms
 #   ./wp.sh phpmyadmin       # same as ./wp.sh, plus start phpMyAdmin
 #   ./wp.sh logs             # follow WordPress container logs
 #   ./wp.sh help             # show usage
@@ -328,12 +328,25 @@ sync_default_theme() {
   fi
 }
 
+# WordPress (Apache) runs as www-data; uploads must be writable by that user.
+# Create the directory if missing, then enforce owner/group and mode 755.
+ensure_uploads_permissions() {
+  echo "==> Ensuring wp-content/uploads is owned by www-data:www-data (mode 755)..."
+  $DC exec -T wordpress bash -lc '
+    uploads=/var/www/html/wp-content/uploads
+    mkdir -p "$uploads"
+    chown -R www-data:www-data "$uploads"
+    chmod 755 "$uploads"
+  ' || echo "    Warning: could not set uploads permissions."
+}
+
 run_sync() {
   sync_wp_config
   sync_plugins
   sync_mu_plugins
   sync_themes
   sync_default_theme
+  ensure_uploads_permissions
 }
 
 show_usage() {
@@ -345,7 +358,7 @@ Usage:
   ./wp.sh exec <cmd ...>   Run a command in the WordPress container
   ./wp.sh wp [args ...]    Run WP-CLI (wp --allow-root) in the container
   ./wp.sh shell            Open an interactive shell in the container
-  ./wp.sh sync             Re-apply plugins, mu-plugins, themes, and wp-config
+  ./wp.sh sync             Re-apply plugins, mu-plugins, themes, wp-config, and uploads perms
   ./wp.sh phpmyadmin       Full WordPress setup plus phpMyAdmin
   ./wp.sh logs             Follow WordPress container logs
   ./wp.sh help             Show this help
@@ -534,7 +547,7 @@ fi)
                        config/wp-config.d/.
 
    Useful commands (run from this docker/ directory):
-     ./wp.sh sync        # re-apply plugins, mu-plugins, themes, and wp-config
+     ./wp.sh sync        # re-apply plugins, mu-plugins, themes, wp-config, uploads perms
      ./wp.sh shell       # interactive shell in the container
      ./wp.sh phpmyadmin  # full setup plus phpMyAdmin
      ./wp.sh wp plugin list
