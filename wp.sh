@@ -700,16 +700,17 @@ sync_default_theme() {
   fi
 }
 
-# WordPress (Apache) runs as www-data; uploads must be writable by that user.
-# Create the directory if missing, then enforce owner/group and mode 755.
+# WordPress (Apache) runs as www-data; uploads and upgrade must be writable by that user.
+# Create the directories if missing, then enforce owner/group and mode 755.
 ensure_uploads_permissions() {
-  echo "==> Ensuring wp-content/uploads is owned by www-data:www-data (mode 755)..."
+  echo "==> Ensuring wp-content/uploads and wp-content/upgrade are owned by www-data:www-data (mode 755)..."
   $DC exec -T wordpress bash -lc '
-    uploads=/var/www/html/wp-content/uploads
-    mkdir -p "$uploads"
-    chown -R www-data:www-data "$uploads"
-    chmod 755 "$uploads"
-  ' || echo "    Warning: could not set uploads permissions."
+    for dir in /var/www/html/wp-content/uploads /var/www/html/wp-content/upgrade; do
+      mkdir -p "$dir"
+      chown -R www-data:www-data "$dir"
+      chmod 755 "$dir"
+    done
+  ' || echo "    Warning: could not set uploads/upgrade permissions."
 }
 
 run_sync() {
