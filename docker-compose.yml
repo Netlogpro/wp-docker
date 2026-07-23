@@ -41,6 +41,8 @@ services:
       # Host config/ holds wp-config snippets (read-only). wp.sh ensures they are
       # included from wp-config.php and applies .env constants on each run.
       - ./config:/docker-config:ro
+      # PHP upload / size limits from .env (written by wp.sh → config/php-uploads.ini).
+      - ./config/php-uploads.ini:/usr/local/etc/php/conf.d/zz-uploads.ini:ro
       # Host plugins/ holds .zip archives only (read-only). wp.sh installs them
       # into wp-content/plugins inside the container without extracting on the host.
       - ./plugins:/var/plugin-zips:ro
@@ -66,7 +68,8 @@ services:
       PMA_PORT: 3306
       PMA_USER: root
       PMA_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
-      UPLOAD_LIMIT: 256M
+      # Keep in sync with PHP_UPLOAD_MAX_FILESIZE (defaults to 64M).
+      UPLOAD_LIMIT: ${PHP_UPLOAD_MAX_FILESIZE:-64M}
       PMA_ABSOLUTE_URI: http://localhost:${PHPMYADMIN_PORT:-8081}/
 
 volumes:
