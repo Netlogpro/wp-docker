@@ -18,7 +18,7 @@
 #   ./wp.sh exec <cmd ...>   # run a command in the WordPress container
 #   ./wp.sh wp [args ...]    # run WP-CLI (wp --allow-root) in the container
 #   ./wp.sh shell            # open an interactive shell in the container
-#   ./wp.sh sync             # re-apply plugins, mu-plugins, themes, wp-config, uploads perms
+#   ./wp.sh sync             # re-apply plugins, mu-plugins, themes, wp-config, wp-content perms
 #   ./wp.sh phpmyadmin       # same as ./wp.sh, plus start phpMyAdmin
 #   ./wp.sh logs             # follow WordPress container logs
 #   ./wp.sh help             # show usage
@@ -700,17 +700,20 @@ sync_default_theme() {
   fi
 }
 
-# WordPress (Apache) runs as www-data; uploads and upgrade must be writable by that user.
-# Create the directories if missing, then enforce owner/group and mode 755.
-ensure_uploads_permissions() {
-  echo "==> Ensuring wp-content/uploads and wp-content/upgrade are owned by www-data:www-data (mode 755)..."
+# WordPress (Apache) runs as www-data. Dashboard plugin/theme install & update
+# need write access under wp-content. Folders synced via `docker cp` / WP-CLI as
+# root would otherwise stay root-owned and fail with "files could not be copied".
+ensure_wp_content_permissions() {
+  echo "==> Ensuring wp-content/{plugins,themes,mu-plugins,uploads,upgrade} are owned by www-data:www-data..."
   $DC exec -T wordpress bash -lc '
-    for dir in /var/www/html/wp-content/uploads /var/www/html/wp-content/upgrade; do
-      mkdir -p "$dir"
-      chown -R www-data:www-data "$dir"
-      chmod 755 "$dir"
+    base=/var/www/html/wp-content
+    for dir in plugins themes mu-plugins uploads upgrade; do
+      mkdir -p "$base/$dir"
+      chown -R www-data:www-data "$base/$dir"
+      find "$base/$dir" -type d -exec chmod 755 {} +
+      find "$base/$dir" -type f -exec chmod 644 {} +
     done
-  ' || echo "    Warning: could not set uploads/upgrade permissions."
+  ' || echo "    Warning: could not set wp-content permissions."
 }
 
 run_sync() {
@@ -720,7 +723,7 @@ run_sync() {
   sync_mu_plugins
   sync_themes
   sync_default_theme
-  ensure_uploads_permissions
+  ensure_wp_content_permissions
 }
 
 show_usage() {
@@ -735,7 +738,7 @@ Usage:
   ./wp.sh exec <cmd ...>   Run a command in the WordPress container
   ./wp.sh wp [args ...]    Run WP-CLI (wp --allow-root) in the container
   ./wp.sh shell            Open an interactive shell in the container
-  ./wp.sh sync             Re-apply plugins, mu-plugins, themes, wp-config, and uploads perms
+  ./wp.sh sync             Re-apply plugins, mu-plugins, themes, wp-config, and wp-content perms
   ./wp.sh phpmyadmin       Full WordPress setup plus phpMyAdmin
   ./wp.sh logs             Follow WordPress container logs
   ./wp.sh help             Show this help
@@ -1025,7 +1028,7 @@ fi)
                        .env and run ./wp.sh sync (reloads Apache).
 
    Useful commands (run from this docker/ directory):
-     ./wp.sh sync        # re-apply plugins, mu-plugins, themes, wp-config, uploads perms
+     ./wp.sh sync        # re-apply plugins, mu-plugins, themes, wp-config, wp-content perms
      ./wp.sh shell       # interactive shell in the container
      ./wp.sh local-ssl   # start with local HTTPS
      ./wp.sh global-ssl  # start with Let's Encrypt HTTPS
