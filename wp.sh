@@ -627,6 +627,15 @@ sync_plugins() {
   echo "==> Syncing plugins from plugins/ ..."
   local plugin_zips_dir=/var/plugin-zips
   local plugin_install_dir=/var/www/html/wp-content/plugins
+  local activate_flags=()
+  local activate_label="Activating"
+
+  # Network-activate across the Multisite network when enabled (or already a network).
+  if multisite_enabled || is_wp_multisite; then
+    activate_flags=(--network)
+    activate_label="Network-activating"
+    echo "    Multisite detected — plugins will be network-activated."
+  fi
 
   shopt -s nullglob
   local plugin_entries=(plugins/*)
@@ -646,7 +655,8 @@ sync_plugins() {
 
     if [ -f "$entry" ] && [[ "$name" == *.zip ]]; then
       echo "    Installing $name from archive (extract inside container)..."
-      $DC exec -T wordpress wp --allow-root plugin install "$plugin_zips_dir/$name" --activate --force \
+      $DC exec -T wordpress wp --allow-root plugin install "$plugin_zips_dir/$name" \
+        --activate "${activate_flags[@]}" --force \
         || echo "    Warning: could not install '$name' (is it a valid WordPress plugin zip?)."
       continue
     fi
@@ -654,8 +664,8 @@ sync_plugins() {
     if [ -f "$entry" ] && [[ "$name" == *.php ]]; then
       echo "    Copying single-file plugin $name into the container..."
       $DC cp "$entry" "wordpress:$plugin_install_dir/$name"
-      echo "    Activating $name..."
-      $DC exec -T wordpress wp --allow-root plugin activate "$name" \
+      echo "    ${activate_label} $name..."
+      $DC exec -T wordpress wp --allow-root plugin activate "$name" "${activate_flags[@]}" \
         || echo "    Warning: could not activate '$name'."
       continue
     fi
@@ -673,8 +683,8 @@ sync_plugins() {
           || echo "    Warning: composer install failed for $slug, continuing anyway."
       fi
 
-      echo "    Activating $slug..."
-      $DC exec -T wordpress wp --allow-root plugin activate "$slug" \
+      echo "    ${activate_label} $slug..."
+      $DC exec -T wordpress wp --allow-root plugin activate "$slug" "${activate_flags[@]}" \
         || echo "    Warning: could not activate '$slug' (check it's a valid plugin folder with a main plugin header)."
       continue
     fi
