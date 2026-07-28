@@ -312,6 +312,8 @@ Drop files into `plugins/` and re-run `./wp.sh`.
 | Plugin folder | Copied into the container; `composer install` runs if needed; then activated |
 | Single `*.php` file | Copied and activated |
 
+When `WP_MULTISITE=true` (or the site is already a network), plugins are **network-activated** (`wp plugin activate --network`) so they apply across all sites.
+
 The host `plugins/` folder stays clean — zip archives are **not** extracted on the host.
 
 ```
