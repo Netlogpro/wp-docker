@@ -37,7 +37,7 @@ else
   DC="docker-compose"
 fi
 
-mkdir -p plugins mu-plugins themes config/wp-config.d
+mkdir -p plugins mu-plugins themes config/wp-config.d hooks
 
 if [ ! -f .env ]; then
   cp .env.example .env
@@ -47,6 +47,20 @@ fi
 if [ ! -f config/wp-config.extra.php ]; then
   cp config/wp-config.extra.php.example config/wp-config.extra.php
   echo "==> Created config/wp-config.extra.php from config/wp-config.extra.php.example."
+fi
+
+if [ ! -f hooks/post-setup.sh ]; then
+  if [ -f hooks/post-setup.sh.example ]; then
+    cp hooks/post-setup.sh.example hooks/post-setup.sh
+  else
+    cat > hooks/post-setup.sh <<'HOOK'
+#!/usr/bin/env bash
+set -euo pipefail
+# Add your custom commands below this line.
+HOOK
+  fi
+  chmod +x hooks/post-setup.sh 2>/dev/null || true
+  echo "==> Created hooks/post-setup.sh (add project-specific commands here)."
 fi
 
 set -a
@@ -832,6 +846,41 @@ run_sync() {
   ensure_wp_content_permissions
 }
 
+# Optional project hook: hooks/post-setup.sh (edit that file, not wp.sh).
+# Captures stdout/stderr for the final ready banner. Non-zero exit is a warning.
+POST_SETUP_OUTPUT=""
+run_post_setup_hook() {
+  local hook="hooks/post-setup.sh"
+  POST_SETUP_OUTPUT=""
+
+  if [ ! -f "$hook" ]; then
+    return 0
+  fi
+
+  # Skip if the hook has no executable commands (only blank lines / comments).
+  if ! grep -qEv '^\s*(#|$)|^\s*set\s+' "$hook" 2>/dev/null; then
+    return 0
+  fi
+
+  echo "==> Running hooks/post-setup.sh ..."
+  set +e
+  POST_SETUP_OUTPUT="$(
+    export DC WP_SITE_URL_RESOLVED WP_SITE_TITLE WP_ADMIN_USER WP_ADMIN_PASSWORD \
+      WP_ADMIN_EMAIL SITE_HOST SSL_MODE WORDPRESS_PORT PHPMYADMIN_PORT \
+      WP_MULTISITE WP_MULTISITE_TYPE HTTPS_PORT HTTP_PORT
+    bash "$hook" 2>&1
+  )"
+  local hook_status=$?
+  set -e
+
+  if [ "$hook_status" -ne 0 ]; then
+    echo "    Warning: hooks/post-setup.sh exited with status ${hook_status}." >&2
+  fi
+  if [ -n "$POST_SETUP_OUTPUT" ]; then
+    echo "$POST_SETUP_OUTPUT"
+  fi
+}
+
 show_usage() {
   cat <<'EOF'
 Usage:
@@ -1092,10 +1141,17 @@ fi
 
 run_sync
 
+run_post_setup_hook
+
 cat <<EOF
 
 ================================================================
  WordPress test environment is ready!
+$(if [ -n "${POST_SETUP_OUTPUT:-}" ]; then
+  echo ""
+  echo "   Custom setup (hooks/post-setup.sh):"
+  printf '%s\n' "$POST_SETUP_OUTPUT" | sed 's/^/   /'
+fi)
 $(if [ "$WITH_PHPMYADMIN" = true ]; then echo ""; echo "   phpMyAdmin:  http://localhost:${PHPMYADMIN_PORT}/"; fi)
 $(if [ -n "$SSL_MODE" ]; then
   echo ""
@@ -1181,6 +1237,10 @@ fi)
 
    PHP uploads:       set PHP_UPLOAD_MAX_FILESIZE / PHP_POST_MAX_SIZE / etc. in
                        .env and run ./wp.sh sync (reloads Apache).
+
+   Custom hook:       put project-specific commands in hooks/post-setup.sh
+                       (see hooks/post-setup.sh.example). It runs before this
+                       banner; its output is shown under "Custom setup".
 
    Useful commands (run from this docker/ directory):
      ./wp.sh sync        # re-apply plugins, mu-plugins, themes, wp-config, wp-content perms

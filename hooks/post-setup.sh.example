@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+#
+# Project-specific post-setup hook (optional).
+#
+# Copied to hooks/post-setup.sh on first ./wp.sh run if that file is missing.
+# Edit hooks/post-setup.sh for per-project custom steps — do not change wp.sh.
+#
+# Runs once at the end of a full stack start (./wp.sh, ./wp.sh local-ssl, etc.),
+# after WordPress is installed/synced and before the final "ready" banner.
+# stdout/stderr is captured and appended to that banner.
+#
+# Working directory: the docker/ project root (same as wp.sh).
+# Useful variables exported by wp.sh:
+#   DC, WP_SITE_URL_RESOLVED, WP_SITE_TITLE, WP_ADMIN_USER, WP_ADMIN_PASSWORD,
+#   WP_ADMIN_EMAIL, SITE_HOST, SSL_MODE, WORDPRESS_PORT, PHPMYADMIN_PORT
+#
+# Examples:
+#   $DC exec -T wordpress wp --allow-root option update blogdescription "Hello"
+#   $DC exec -T wordpress wp --allow-root rewrite flush --hard
+#   echo "Custom note for the ready banner"
+#
+# Leave this file empty (aside from comments) when you have nothing to run.
+#
+set -euo pipefail
+
+# Add your custom commands below this line.
