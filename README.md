@@ -13,6 +13,7 @@ Built for plugin and theme testing — no local PHP, MySQL, or Apache installati
 - **Plugins, themes, and MU-plugins** — drop `.zip` files, folders, or single-file `.php` plugins
 - **wp-config management** — common constants from `.env`, advanced PHP overrides from `config/`
 - **Custom local domains** — e.g. `newsite.local` via `.env` and `/etc/hosts`
+- **WordPress Multisite** — subdirectory or subdomain networks via `.env`
 - **Optional HTTPS** — `./wp.sh local-ssl` (Caddy local CA) or `./wp.sh global-ssl` (Let's Encrypt)
 - **WP-CLI + Composer** pre-installed in the WordPress container
 
@@ -252,8 +253,27 @@ Copy `.env.example` to `.env` (done automatically on first run) and edit as need
 | `WP_ADMIN_USER` | `admin` | Admin username |
 | `WP_ADMIN_PASSWORD` | `admin` | Admin password |
 | `WP_ADMIN_EMAIL` | `admin@example.com` | Admin email; also the Let's Encrypt email for `./wp.sh global-ssl` (must be real) |
-| `WP_SITE_URL` | *(empty)* | Custom site URL; **required for SSL**; see [Custom domain](#custom-domain) |
+| `WP_SITE_URL` | *(empty)* | Custom site URL; **required for SSL** and subdomain Multisite; see [Custom domain](#custom-domain) |
+| `WP_MULTISITE` | `false` | Enable WordPress Multisite (`true` / `false`) |
+| `WP_MULTISITE_TYPE` | `subdirectory` | `subdirectory` or `subdomain` (when Multisite is enabled) |
 | `WP_DEFAULT_THEME` | *(empty)* | Theme slug to activate after install |
+
+### Multisite
+
+Set in `.env` and run `./wp.sh` (fresh install uses `wp core multisite-install`; an existing single site is converted with `wp core multisite-convert`).
+
+```bash
+WP_MULTISITE=true
+WP_MULTISITE_TYPE=subdirectory   # or: subdomain
+WP_SITE_URL=newsite.local        # required for subdomain type
+```
+
+| Type | Site URLs | Notes |
+|---|---|---|
+| `subdirectory` | `https://newsite.local/site-slug/` | Works with `localhost`; pretty permalinks required (set by `wp.sh`) |
+| `subdomain` | `https://site-slug.newsite.local/` | Needs a real hostname in `WP_SITE_URL` (not `localhost`). Add each subsite host to `/etc/hosts` / Windows hosts — **wildcard `*.domain` is not supported in hosts files**. With `local-ssl`, Caddy is configured for `domain` and `*.domain`. |
+
+Network admin: `/wp-admin/network/`. Turning Multisite **off** later is not automated (WordPress does not cleanly reverse a network).
 
 ### wp-config constants
 

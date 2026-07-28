@@ -13,3 +13,6 @@
 	encode gzip
 	reverse_proxy wordpress:80
 }
+
+# With subdomain Multisite, wp.sh generates:
+# {$SITE_HOST}, *.{$SITE_HOST} { ... }

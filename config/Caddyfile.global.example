@@ -14,3 +14,6 @@
 	encode gzip
 	reverse_proxy wordpress:80
 }
+
+# With subdomain Multisite, wp.sh generates apex + wildcard hosts.
+# Wildcard Let's Encrypt certs require a DNS challenge provider.
