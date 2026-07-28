@@ -63,10 +63,32 @@ docker/
 │   ├── wp-config.extra.php.example
 │   ├── wp-config.extra.php      # Local overrides (gitignored, auto-created)
 │   └── wp-config.d/             # Optional modular PHP snippets
+├── hooks/
+│   ├── post-setup.sh.example    # Documented template for custom setup
+│   └── post-setup.sh            # Project-specific hook (edit this, not wp.sh)
 ├── plugins/                     # Plugin .zip archives (gitignored contents)
 ├── mu-plugins/                  # Must-use plugin archives / files
 └── themes/                      # Theme .zip archives / folders
 ```
+
+### Custom post-setup hook
+
+For project-specific steps (extra WP-CLI, seed data, notices) **without changing `wp.sh`**, edit:
+
+```bash
+hooks/post-setup.sh
+```
+
+It runs at the end of a full stack start (`./wp.sh`, `./wp.sh local-ssl`, `./wp.sh phpmyadmin`, …), after install/sync and **before** the ready banner. Its stdout/stderr is printed during the run and again under **Custom setup** in that banner.
+
+An empty/comment-only script is skipped. Available variables include `DC`, `WP_SITE_URL_RESOLVED`, `WP_ADMIN_USER`, `WP_ADMIN_PASSWORD`, `SITE_HOST`, `SSL_MODE`. Example:
+
+```bash
+$DC exec -T wordpress wp --allow-root option update blogdescription "Dev stack"
+echo "Seeded blog description"
+```
+
+See `hooks/post-setup.sh.example` for more detail.
 
 ## Commands
 
