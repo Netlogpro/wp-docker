@@ -641,11 +641,14 @@ sync_plugins() {
   echo "==> Syncing plugins from plugins/ ..."
   local plugin_zips_dir=/var/plugin-zips
   local plugin_install_dir=/var/www/html/wp-content/plugins
+  # wp plugin install uses --activate-network; wp plugin activate uses --network.
+  local install_activate_flags=(--activate)
   local activate_flags=()
   local activate_label="Activating"
 
   # Network-activate across the Multisite network when enabled (or already a network).
   if multisite_enabled || is_wp_multisite; then
+    install_activate_flags=(--activate-network)
     activate_flags=(--network)
     activate_label="Network-activating"
     echo "    Multisite detected — plugins will be network-activated."
@@ -670,7 +673,7 @@ sync_plugins() {
     if [ -f "$entry" ] && [[ "$name" == *.zip ]]; then
       echo "    Installing $name from archive (extract inside container)..."
       $DC exec -T wordpress wp --allow-root plugin install "$plugin_zips_dir/$name" \
-        --activate "${activate_flags[@]}" --force \
+        "${install_activate_flags[@]}" --force \
         || echo "    Warning: could not install '$name' (is it a valid WordPress plugin zip?)."
       continue
     fi
